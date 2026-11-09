@@ -369,3 +369,4 @@ export function MonitoringView({ initialStats, fetchStatus, errorMessage }: Moni
     </div>
   );
 }
+

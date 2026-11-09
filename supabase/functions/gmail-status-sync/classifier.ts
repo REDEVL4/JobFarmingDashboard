@@ -229,3 +229,4 @@ export function classifyRecruitmentEmail(email: EmailClassificationInput): Class
     actionItems: [],
   };
 }
+

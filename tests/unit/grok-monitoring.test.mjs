@@ -50,3 +50,4 @@ test("Grok Read-Only Monitoring Contract", async (t) => {
     assert.equal(safe.secret_token_internal, undefined);
   });
 });
+

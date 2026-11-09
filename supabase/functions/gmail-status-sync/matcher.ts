@@ -155,3 +155,4 @@ export function matchApplicationToEmail(
     matchBasis: `Multiple active applications for ${matchingCompanies[0].company} (${matchingCompanies.length} roles). Email does not specify unique requisition.`,
   };
 }
+

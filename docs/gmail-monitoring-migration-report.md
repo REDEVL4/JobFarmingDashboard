@@ -164,3 +164,4 @@ select cron.schedule(
 3. **Register Supabase Cron**: Run the SQL in Section 5 above when ready to start hourly polling in dry-run mode.
 4. **Redeploy on Vercel**: Redeploy Vercel with `NEXT_PUBLIC_SUPABASE_SCHEMA=public` to get the updated monitoring telemetry and table score fixes live.
 5. **Approval for Live Writes**: Once you review the initial dry-run log output on `/monitoring` and approve, switch `"dry_run": false` in the cron definition.
+

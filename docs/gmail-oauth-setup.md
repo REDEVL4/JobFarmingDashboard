@@ -99,3 +99,4 @@ Once credentials are saved, test the integration without writing to the database
 1. Open the dashboard at `https://job-farming-dashboard.vercel.app/monitoring` (or local `http://localhost:3000/monitoring`).
 2. Click **Test Dry-Run**.
 3. Confirm that the status reports `dry_run_completed` with `0` database status changes and real message discovery counts.
+
