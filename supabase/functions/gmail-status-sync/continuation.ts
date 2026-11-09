@@ -73,7 +73,14 @@ export function resolveScanWindow(params: {
   }
 
   // 3. Inspect the latest production log for an incomplete backfill
-  const vResults = latestProductionLog?.verification_results || {};
+  let vResults = latestProductionLog?.verification_results || {};
+  if (typeof vResults === "string") {
+    try {
+      vResults = JSON.parse(vResults);
+    } catch {
+      vResults = {};
+    }
+  }
   const isBacklogUnfinished =
     vResults.status === "partial_backfill" ||
     vResults.has_more_backlog === true ||

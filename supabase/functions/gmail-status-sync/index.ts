@@ -260,11 +260,24 @@ Deno.serve(async (req) => {
     // Strictly retrieve the latest verified PRODUCTION run (dry_run IS NOT true).
     // An incomplete backfill (status='partial_backfill') or dry-run log must NEVER
     // advance the production checkpoint past unprocessed messages.
+    // Handles both JSONB objects and any legacy JSONB strings defensively.
     const [latestProductionLog] = await sql`
-      select started_at, completed_at, verification_results
+      select started_at, completed_at,
+             case 
+               when jsonb_typeof(verification_results) = 'string' 
+               then (verification_results #>> '{}')::jsonb 
+               else verification_results 
+             end as verification_results
         from jobbot.sync_logs
        where bot_name = ${BOT_NAME}
-         and coalesce((verification_results->>'dry_run')::boolean, false) = false
+         and coalesce(
+           case 
+             when jsonb_typeof(verification_results) = 'string' 
+             then ((verification_results #>> '{}')::jsonb->>'dry_run')::boolean
+             else (verification_results->>'dry_run')::boolean
+           end, 
+           false
+         ) = false
        order by started_at desc limit 1
     `;
 
@@ -501,9 +514,35 @@ Deno.serve(async (req) => {
       // - updated_count is strictly 0 (no actual committed updates)
       // - proposed updates are recorded separately in verification_results
       // - checkpoint_advanced is strictly false
+      // - verification_results is stored as a true JSONB object via sql.json
       // - No sync_cursors advancement
       // - No application status updates
       // - No application_events inserts
+      const dryRunVerificationResults = {
+        status: continuation.status,
+        dry_run: true,
+        mailbox: OWNER_EMAIL,
+        run_kind: scanWindow.isResumingBackfill
+          ? "backfill_continuation_dry_run"
+          : (gapReconcile ? "gap_reconciliation_dry_run" : "scheduled_incremental_poll_dry_run"),
+        scan_start_at: new Date(scanWindow.queryAfterEpoch * 1000).toISOString(),
+        last_gmail_scan_at: completedAt,
+        has_more_backlog: continuation.hasMoreBacklog,
+        all_pages_complete: continuation.allPagesComplete,
+        checkpoint_advanced: false,
+        continuation_before_epoch: continuation.nextContinuationBeforeEpoch,
+        continuation_after_epoch: continuation.nextContinuationAfterEpoch,
+        continuation_ceiling_time: continuation.nextContinuationCeilingTime,
+        continuation_page_token: continuation.hasMoreBacklog ? (pageToken || null) : null,
+        messages_discovered: rawMessageHeaders.length,
+        proposed_changes_count: proposedChanges.length,
+        proposed_reviews_count: proposedReviews.length,
+        duplicate_messages_count: duplicateCount,
+        ignored_messages_count: ignoredMessageIds.length,
+        proposed_changes: proposedChanges,
+        live_write_gate_locked: liveWriteGateLocked,
+      };
+
       await sql`
         insert into jobbot.sync_logs (
           run_id, bot_name, started_at, completed_at,
@@ -512,31 +551,8 @@ Deno.serve(async (req) => {
         ) values (
           ${runId}::uuid, ${BOT_NAME}, ${startedAt}::timestamptz, ${completedAt}::timestamptz,
           ${0}, ${0}, ${duplicateCount + ignoredMessageIds.length},
-          ${JSON.stringify([])}::jsonb,
-          ${JSON.stringify({
-            status: continuation.status,
-            dry_run: true,
-            mailbox: OWNER_EMAIL,
-            run_kind: scanWindow.isResumingBackfill
-              ? "backfill_continuation_dry_run"
-              : (gapReconcile ? "gap_reconciliation_dry_run" : "scheduled_incremental_poll_dry_run"),
-            scan_start_at: new Date(scanWindow.queryAfterEpoch * 1000).toISOString(),
-            last_gmail_scan_at: completedAt,
-            has_more_backlog: continuation.hasMoreBacklog,
-            all_pages_complete: continuation.allPagesComplete,
-            checkpoint_advanced: false,
-            continuation_before_epoch: continuation.nextContinuationBeforeEpoch,
-            continuation_after_epoch: continuation.nextContinuationAfterEpoch,
-            continuation_ceiling_time: continuation.nextContinuationCeilingTime,
-            continuation_page_token: continuation.hasMoreBacklog ? (pageToken || null) : null,
-            messages_discovered: rawMessageHeaders.length,
-            proposed_changes_count: proposedChanges.length,
-            proposed_reviews_count: proposedReviews.length,
-            duplicate_messages_count: duplicateCount,
-            ignored_messages_count: ignoredMessageIds.length,
-            proposed_changes: proposedChanges,
-            live_write_gate_locked: liveWriteGateLocked,
-          })}::jsonb
+          ${sql.json([])},
+          ${sql.json(dryRunVerificationResults)}
         )
       `;
 
@@ -657,7 +673,7 @@ Deno.serve(async (req) => {
             ${review.eventAt}::timestamptz,
             ${review.reasonCode},
             ${review.proposedStage},
-            ${JSON.stringify(review.candidateApplications)}::jsonb,
+            ${sql.json(review.candidateApplications)},
             ${review.evidenceSummary},
             'open',
             now(),
@@ -678,6 +694,30 @@ Deno.serve(async (req) => {
       // Record live production sync_log
       // Invariant: An incomplete backfill (hasMoreBacklog=true) MUST NEVER create a log
       // that can advance the checkpoint past unprocessed messages!
+      // Serializes errors and verification_results as true JSONB objects/arrays via sql.json
+      const liveVerificationResults = {
+        status: continuation.status,
+        dry_run: false,
+        mailbox: OWNER_EMAIL,
+        run_kind: scanWindow.isResumingBackfill
+          ? "backfill_continuation"
+          : (gapReconcile ? "gap_reconciliation" : "scheduled_incremental_poll"),
+        scan_start_at: new Date(scanWindow.queryAfterEpoch * 1000).toISOString(),
+        last_gmail_scan_at: completedAt,
+        has_more_backlog: continuation.hasMoreBacklog,
+        all_pages_complete: continuation.allPagesComplete,
+        checkpoint_advanced: continuation.checkpointAdvanced,
+        continuation_before_epoch: continuation.nextContinuationBeforeEpoch,
+        continuation_after_epoch: continuation.nextContinuationAfterEpoch,
+        continuation_ceiling_time: continuation.nextContinuationCeilingTime,
+        continuation_page_token: continuation.hasMoreBacklog ? (pageToken || null) : null,
+        messages_discovered: rawMessageHeaders.length,
+        updated_count: actualCommittedUpdates,
+        duplicate_deliveries_skipped: duplicateDeliveriesSkipped,
+        review_queued_count: actualCommittedReviews,
+        latest_successful_database_write_at: completedAt,
+      };
+
       await tx`
         insert into jobbot.sync_logs (
           run_id, bot_name, started_at, completed_at,
@@ -686,29 +726,8 @@ Deno.serve(async (req) => {
         ) values (
           ${runId}::uuid, ${BOT_NAME}, ${startedAt}::timestamptz, ${completedAt}::timestamptz,
           ${0}, ${actualCommittedUpdates}, ${duplicateCount + ignoredMessageIds.length + duplicateDeliveriesSkipped},
-          ${JSON.stringify([])}::jsonb,
-          ${JSON.stringify({
-            status: continuation.status,
-            dry_run: false,
-            mailbox: OWNER_EMAIL,
-            run_kind: scanWindow.isResumingBackfill
-              ? "backfill_continuation"
-              : (gapReconcile ? "gap_reconciliation" : "scheduled_incremental_poll"),
-            scan_start_at: new Date(scanWindow.queryAfterEpoch * 1000).toISOString(),
-            last_gmail_scan_at: completedAt,
-            has_more_backlog: continuation.hasMoreBacklog,
-            all_pages_complete: continuation.allPagesComplete,
-            checkpoint_advanced: continuation.checkpointAdvanced,
-            continuation_before_epoch: continuation.nextContinuationBeforeEpoch,
-            continuation_after_epoch: continuation.nextContinuationAfterEpoch,
-            continuation_ceiling_time: continuation.nextContinuationCeilingTime,
-            continuation_page_token: continuation.hasMoreBacklog ? (pageToken || null) : null,
-            messages_discovered: rawMessageHeaders.length,
-            updated_count: actualCommittedUpdates,
-            duplicate_deliveries_skipped: duplicateDeliveriesSkipped,
-            review_queued_count: actualCommittedReviews,
-            latest_successful_database_write_at: completedAt,
-          })}::jsonb
+          ${sql.json([])},
+          ${sql.json(liveVerificationResults)}
         )
       `;
     });

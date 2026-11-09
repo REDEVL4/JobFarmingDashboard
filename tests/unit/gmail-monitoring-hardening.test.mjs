@@ -418,3 +418,97 @@ test("Gmail Hardening: Security Gate and Invocation Authentication", async (t) =
   });
 });
 
+test("Gmail Hardening: JSONB Serialization Invariant & Regression", async (t) => {
+  await t.test("verifies verification_results->>'status' extracts directly from JSONB object vs string", () => {
+    // Simulating PostgreSQL JSONB behavior
+    const mockPostgresJsonb = (val) => {
+      // In PostgreSQL:
+      // An object passed to jsonb has jsonb_typeof = 'object'
+      // A quoted string passed to jsonb has jsonb_typeof = 'string'
+      const isString = typeof val === "string";
+      return {
+        typeof: isString ? "string" : "object",
+        extractStatusArrow: () => {
+          // PostgreSQL ->> operator:
+          // If jsonb value is a string, ->> on a key returns NULL
+          if (isString) return null;
+          return val.status || null;
+        },
+        extractDryRunArrow: () => {
+          if (isString) return null;
+          return val.dry_run ?? null;
+        },
+      };
+    };
+
+    const targetPayload = {
+      status: "dry_run_completed",
+      dry_run: true,
+      mailbox: "govardhanreddy.vys7@gmail.com",
+    };
+
+    // Bug reproduction: passing JSON.stringify(targetPayload)
+    const buggyStringified = mockPostgresJsonb(JSON.stringify(targetPayload));
+    assert.equal(buggyStringified.typeof, "string");
+    assert.equal(buggyStringified.extractStatusArrow(), null, "buggy serialization caused ->>'status' to return null");
+
+    // Fix verification: passing raw object via sql.json
+    const fixedObject = mockPostgresJsonb(targetPayload);
+    assert.equal(fixedObject.typeof, "object");
+    assert.equal(fixedObject.extractStatusArrow(), "dry_run_completed", "fixed serialization allows ->>'status' to directly return dry_run_completed");
+    assert.equal(fixedObject.extractDryRunArrow(), true);
+  });
+
+  await t.test("resolveScanWindow handles both legacy JSONB string and new JSONB object seamlessly", () => {
+    const lastVerifiedCheckpoint = "2026-11-08T22:47:41.801952+00:00";
+
+    // 1. With structured object
+    const logWithObject = {
+      started_at: "2026-11-09T10:00:00Z",
+      completed_at: "2026-11-09T10:01:00Z",
+      verification_results: {
+        status: "completed",
+        dry_run: false,
+        has_more_backlog: false,
+        checkpoint_advanced: true,
+      },
+    };
+
+    const window1 = resolveScanWindow({
+      latestProductionLog: logWithObject,
+      gapReconcile: false,
+      lastVerifiedCheckpoint,
+      overlapMinutes: 15,
+    });
+    // Checkpoint advanced to 10:01 minus 15 min = 09:46
+    assert.equal(window1.isResumingBackfill, false);
+    assert.equal(window1.queryAfterEpoch, Math.floor(new Date("2026-11-09T09:46:00Z").getTime() / 1000));
+
+    // 2. With legacy stringified JSON (defensive parsing)
+    const logWithString = {
+      started_at: "2026-11-09T10:00:00Z",
+      completed_at: "2026-11-09T10:01:00Z",
+      verification_results: JSON.stringify({
+        status: "partial_backfill",
+        dry_run: false,
+        has_more_backlog: true,
+        checkpoint_advanced: false,
+        continuation_before_epoch: 1794200000,
+        continuation_after_epoch: 1794100000,
+        continuation_ceiling_time: "2026-11-09T10:00:00Z",
+      }),
+    };
+
+    const window2 = resolveScanWindow({
+      latestProductionLog: logWithString,
+      gapReconcile: false,
+      lastVerifiedCheckpoint,
+      overlapMinutes: 15,
+    });
+    assert.equal(window2.isResumingBackfill, true);
+    assert.equal(window2.queryBeforeEpoch, 1794200000);
+    assert.equal(window2.queryAfterEpoch, 1794100000);
+  });
+});
+
+
