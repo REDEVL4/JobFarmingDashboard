@@ -1,0 +1,75 @@
+{
+  "url": "https://job-farming-dashboard.vercel.app",
+  "timestamp": "2026-11-09T08:06:22.847Z",
+  "healthCheck": {
+    "status": 200,
+    "ok": true,
+    "server": "Vercel",
+    "xVercelId": "cle1::b8b8l-1794211583988-63053925e1a9",
+    "cacheControl": "public, max-age=0, must-revalidate"
+  },
+  "routeProtection": [
+    {
+      "route": "/",
+      "status": 307,
+      "location": "/login",
+      "failClosed": true
+    },
+    {
+      "route": "/applications",
+      "status": 307,
+      "location": "/login",
+      "failClosed": true
+    },
+    {
+      "route": "/monitoring",
+      "status": 307,
+      "location": "/login",
+      "failClosed": true
+    },
+    {
+      "route": "/outreach",
+      "status": 307,
+      "location": "/login",
+      "failClosed": true
+    },
+    {
+      "route": "/diagnostics",
+      "status": 307,
+      "location": "/login",
+      "failClosed": true
+    },
+    {
+      "route": "/api/documents/test-uuid",
+      "status": 307,
+      "location": "/login",
+      "failClosed": true
+    }
+  ],
+  "loginPage": {
+    "title": "Job Farming Command Center — Production Dashboard",
+    "ownerEmailVisible": false,
+    "ownerBadgeVisible": false,
+    "authShieldVisible": false,
+    "failedClosedOnInvalidAuth": true
+  },
+  "oauthPage": {
+    "headerVisible": false,
+    "approvalLocked": false,
+    "securityWarningVisible": false
+  },
+  "mobileResponsiveness": {
+    "loginResponsive": false,
+    "oauthResponsive": false
+  },
+  "consoleErrors": [
+    {
+      "page": "https://job-farming-dashboard.vercel.app/login",
+      "text": "Failed to load resource: the server responded with a status of 400 ()"
+    }
+  ],
+  "summary": {
+    "passed": 7,
+    "failed": 3
+  }
+}
