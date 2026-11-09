@@ -521,7 +521,7 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
                   <td className="py-3.5 px-4">
                     {app.score ? (
                       <span className="font-semibold text-foreground">
-                        {app.score} <span className="text-muted-foreground font-normal">/ 5</span>
+                        {app.score} <span className="text-muted-foreground font-normal">/ 100</span>
                       </span>
                     ) : (
                       <span className="text-muted-foreground">—</span>
@@ -611,7 +611,7 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
                 </div>
                 <div>
                   <span>Score: </span>
-                  <span className="font-semibold text-foreground">{app.score ? `${app.score}/5` : "—"}</span>
+                  <span className="font-semibold text-foreground">{app.score ? `${app.score}/100` : "—"}</span>
                 </div>
                 <div className="col-span-2 truncate">
                   <span>Location: </span>

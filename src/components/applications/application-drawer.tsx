@@ -43,8 +43,8 @@ export function ApplicationDrawer({ application, onClose }: ApplicationDrawerPro
                   </span>
                   <StatusBadge status={application.normalizedStatus} />
                   {application.score && (
-                    <span className="text-xs px-2 py-0.5 rounded font-bold bg-brand-500/10 text-brand-600 dark:text-brand-400 border border-brand-500/20">
-                      Score: {application.score}/5
+                    <span className="text-xs px-2 py-0.5 rounded font-bold bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">
+                      Score: {application.score}/100
                     </span>
                   )}
                 </div>
