@@ -14,6 +14,7 @@ export interface ScanWindow {
   isResumingBackfill: boolean;
   continuationCeilingTime: string | null;
   startHistoryId?: string | null;
+  syncStrategy?: "history" | "query_full" | "gap_reconciliation";
 }
 
 export interface ContinuationState {
@@ -21,10 +22,12 @@ export interface ContinuationState {
   allPagesComplete: boolean;
   checkpointAdvanced: boolean;
   status: "completed" | "partial_backfill" | "dry_run_completed" | "dry_run_partial_backfill";
+  continuationStrategy: "history" | "query_full" | "gap_reconciliation";
   nextContinuationBeforeEpoch: number | null;
   nextContinuationAfterEpoch: number | null;
   nextContinuationCeilingTime: string | null;
   effectiveCheckpointTime: string | null;
+  lastConsumedHistoryRecordId: string | null;
 }
 
 /**
@@ -68,6 +71,7 @@ export function resolveScanWindow(params: {
       isResumingBackfill: Boolean(bodyBeforeEpoch),
       continuationCeilingTime: null,
       startHistoryId: bodyStartHistoryId || null,
+      syncStrategy: bodyStartHistoryId && !bodyBeforeEpoch ? "history" : "query_full",
     };
   }
 
@@ -80,10 +84,11 @@ export function resolveScanWindow(params: {
       isResumingBackfill: false,
       continuationCeilingTime: null,
       startHistoryId: null, // Force full scan for reconciliation
+      syncStrategy: "gap_reconciliation",
     };
   }
 
-  // 3. Inspect the latest production log for an incomplete backfill
+  // 3. Inspect the latest production log for an incomplete backfill or partial history scan
   let vResults = latestProductionLog?.verification_results || {};
   if (typeof vResults === "string") {
     try {
@@ -98,18 +103,51 @@ export function resolveScanWindow(params: {
     vResults.has_more_backlog === true ||
     vResults.checkpoint_advanced === false;
 
-  const snapshotHistoryId = vResults.start_history_snapshot || vResults.latest_history_id || vResults.history_id || null;
-  const latestHistoryId = bodyStartHistoryId || snapshotHistoryId;
+  const unfinishedStrategy =
+    vResults.continuation_strategy ||
+    vResults.sync_strategy ||
+    (vResults.last_consumed_history_record_id ? "history" : (vResults.continuation_before_epoch ? "query_full" : undefined));
 
-  if (isBacklogUnfinished && vResults.continuation_before_epoch && vResults.continuation_after_epoch) {
-    // Durable backfill continuation: scan older remaining window
-    return {
-      queryAfterEpoch: Number(vResults.continuation_after_epoch),
-      queryBeforeEpoch: Number(vResults.continuation_before_epoch),
-      isResumingBackfill: true,
-      continuationCeilingTime: vResults.continuation_ceiling_time || latestProductionLog?.completed_at || null,
-      startHistoryId: latestHistoryId,
-    };
+  if (isBacklogUnfinished) {
+    // 3A. Unfinished Gmail History API scan: MUST resume using last safely consumed history record ID!
+    // Invariant: Never interpret a partial History API scan as a timestamp-based full-search backfill.
+    if (unfinishedStrategy === "history") {
+      const safeHistoryId =
+        bodyStartHistoryId ||
+        cursorRecord?.last_history_id ||
+        vResults.last_consumed_history_record_id ||
+        vResults.latest_history_id ||
+        vResults.start_history_id ||
+        null;
+
+      // Base timestamp for fallback if history is expired
+      const baseTimestamp = cursorRecord?.last_success_at || latestProductionLog?.completed_at || lastVerifiedCheckpoint;
+      const lastScanMs = new Date(baseTimestamp).getTime() - overlapMinutes * 60_000;
+
+      return {
+        queryAfterEpoch: Math.floor(lastScanMs / 1000),
+        queryBeforeEpoch: null,
+        isResumingBackfill: false, // Strictly false: this is History API continuation, NOT full-search backfill!
+        continuationCeilingTime: null,
+        startHistoryId: safeHistoryId,
+        syncStrategy: "history",
+      };
+    }
+
+    // 3B. Unfinished Full-Search Backfill: resume the outstanding time window
+    if (vResults.continuation_before_epoch && vResults.continuation_after_epoch) {
+      const snapshotHistoryId = vResults.start_history_snapshot || vResults.latest_history_id || vResults.history_id || null;
+      const latestHistoryId = bodyStartHistoryId || snapshotHistoryId;
+
+      return {
+        queryAfterEpoch: Number(vResults.continuation_after_epoch),
+        queryBeforeEpoch: Number(vResults.continuation_before_epoch),
+        isResumingBackfill: true,
+        continuationCeilingTime: vResults.continuation_ceiling_time || latestProductionLog?.completed_at || null,
+        startHistoryId: latestHistoryId,
+        syncStrategy: "query_full",
+      };
+    }
   }
 
   // 4. Standard poll from dedicated ingestion cursor or latest completed checkpoint
@@ -126,7 +164,8 @@ export function resolveScanWindow(params: {
     baseTimestamp = latestProductionLog.completed_at;
   }
 
-  const effectiveHistoryId = bodyStartHistoryId || cursorRecord?.last_history_id || latestHistoryId;
+  const snapshotHistoryId = vResults.start_history_snapshot || vResults.latest_history_id || vResults.history_id || null;
+  const effectiveHistoryId = bodyStartHistoryId || cursorRecord?.last_history_id || snapshotHistoryId;
 
   const lastScanMs = new Date(baseTimestamp).getTime() - overlapMinutes * 60_000;
   return {
@@ -135,6 +174,7 @@ export function resolveScanWindow(params: {
     isResumingBackfill: false,
     continuationCeilingTime: null,
     startHistoryId: effectiveHistoryId,
+    syncStrategy: effectiveHistoryId ? "history" : "query_full",
   };
 }
 
@@ -147,11 +187,13 @@ export function computeContinuationState(params: {
   hasRemainingPageToken: boolean;
   minInternalDate?: number;
   queryAfterEpoch: number;
-  isResumingBackfill: boolean;
+  isResumingBackfill?: boolean;
   continuationCeilingTime?: string | null;
   startedAt: string;
   completedAt: string;
   dryRun: boolean;
+  syncStrategy?: "history" | "query_full" | "gap_reconciliation";
+  lastConsumedHistoryRecordId?: string | null;
 }): ContinuationState {
   const {
     rawMessageCount,
@@ -164,19 +206,41 @@ export function computeContinuationState(params: {
     startedAt,
     completedAt,
     dryRun,
+    syncStrategy,
+    lastConsumedHistoryRecordId,
   } = params;
 
+  const strategy = syncStrategy || "query_full";
   const hitMessageLimit = rawMessageCount >= maxMessages;
   const hasMoreBacklog = hasRemainingPageToken || hitMessageLimit;
 
   if (hasMoreBacklog) {
     // Backlog incomplete: checkpoint must NOT advance past unprocessed messages!
+    if (strategy === "history") {
+      // For History API scans: continuation is history-based, NOT timestamp-based!
+      // Invariant: Do not set continuation_before_epoch/after_epoch so unattended runs
+      // resume strictly from the last safely processed history record ID.
+      return {
+        hasMoreBacklog: true,
+        allPagesComplete: false,
+        checkpointAdvanced: false,
+        status: dryRun ? "dry_run_partial_backfill" : "partial_backfill",
+        continuationStrategy: "history",
+        nextContinuationBeforeEpoch: null,
+        nextContinuationAfterEpoch: null,
+        nextContinuationCeilingTime: null,
+        effectiveCheckpointTime: null, // DO NOT advance checkpoint
+        lastConsumedHistoryRecordId: lastConsumedHistoryRecordId || null,
+      };
+    }
+
+    // For Full-Search backfills (query_full / gap_reconciliation):
+    // In Gmail API, messages are returned newest first.
+    // The unprocessed portion lies before the oldest message fetched in this run.
     const effectiveMinDate = minInternalDate && minInternalDate > 0
       ? minInternalDate
       : queryAfterEpoch * 1000;
     
-    // In Gmail API, messages are returned newest first.
-    // The unprocessed portion lies before the oldest message fetched in this run.
     const nextBeforeEpoch = Math.floor(effectiveMinDate / 1000) + 1;
 
     return {
@@ -184,10 +248,12 @@ export function computeContinuationState(params: {
       allPagesComplete: false,
       checkpointAdvanced: false,
       status: dryRun ? "dry_run_partial_backfill" : "partial_backfill",
+      continuationStrategy: strategy,
       nextContinuationBeforeEpoch: nextBeforeEpoch,
       nextContinuationAfterEpoch: queryAfterEpoch,
       nextContinuationCeilingTime: continuationCeilingTime || startedAt,
       effectiveCheckpointTime: null, // DO NOT advance checkpoint
+      lastConsumedHistoryRecordId: null,
     };
   }
 
@@ -201,10 +267,12 @@ export function computeContinuationState(params: {
     allPagesComplete: true,
     checkpointAdvanced: !dryRun,
     status: dryRun ? "dry_run_completed" : "completed",
+    continuationStrategy: strategy,
     nextContinuationBeforeEpoch: null,
     nextContinuationAfterEpoch: null,
     nextContinuationCeilingTime: null,
     effectiveCheckpointTime: dryRun ? null : effectiveCheckpointTime,
+    lastConsumedHistoryRecordId: lastConsumedHistoryRecordId || null,
   };
 }
 

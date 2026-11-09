@@ -1181,3 +1181,306 @@ test("Test 14: Sensitive auth/security emails are excluded and redacted from que
   assert.equal(typeof hash, "string");
   assert.equal(hash.length, 64);
 });
+
+// =============================================================================
+// REGRESSION SCENARIO 15: Multi-batch Gmail History scan with 500 changes (300 limit)
+// Across two consecutive runs: preserves history strategy, 0 lost label events,
+// 0 duplicates, safe cursor advance, rollback on DB error, and 0 application updates
+// =============================================================================
+test("Scenario 15: Multi-batch Gmail History scan with 500 changes (messagesAdded + labelsAdded) with 300 limit across two consecutive runs", async () => {
+  const originalFetch = globalThis.fetch;
+  const { sql, table, cursors, syncLogs, applications } = createMockQueueDb();
+
+  // Seed candidate application to verify zero stage mutations
+  applications.set("app-test-500", {
+    id: "app-test-500",
+    company: "Google DeepMind",
+    job_title: "Research Engineer",
+    hiring_stage: "Under Review",
+    application_status: "active",
+  });
+
+  // Track API call invocations
+  let historyApiCallCount = 0;
+  let fullSearchApiCallCount = 0;
+  const requestedStartHistoryIds = [];
+
+  // Generate 100 history records (1001 to 1100), each with 3 messagesAdded and 2 labelsAdded
+  // Total changes = 100 * 5 = 500
+  const allHistoryRecords = [];
+  for (let r = 1; r <= 100; r++) {
+    const recId = String(1000 + r);
+    allHistoryRecords.push({
+      id: recId,
+      messagesAdded: [
+        { message: { id: `msg_hist_add_${r}_1`, threadId: `t_add_${r}_1` } },
+        { message: { id: `msg_hist_add_${r}_2`, threadId: `t_add_${r}_2` } },
+        { message: { id: `msg_hist_add_${r}_3`, threadId: `t_add_${r}_3` } },
+      ],
+      labelsAdded: [
+        { message: { id: `msg_hist_lbl_${r}_1`, threadId: `t_lbl_${r}_1` }, labelIds: ["STARRED", "IMPORTANT"] },
+        { message: { id: `msg_hist_lbl_${r}_2`, threadId: `t_lbl_${r}_2` }, labelIds: ["CATEGORY_PERSONAL"] },
+      ],
+    });
+  }
+
+  globalThis.fetch = async (url) => {
+    const urlStr = String(url);
+    if (urlStr.includes("messages?")) {
+      fullSearchApiCallCount++;
+      return new Response(JSON.stringify({ messages: [], nextPageToken: null }), { status: 200 });
+    }
+    if (urlStr.includes("history?")) {
+      historyApiCallCount++;
+      const u = new URL(urlStr);
+      const startHistoryId = u.searchParams.get("startHistoryId");
+      requestedStartHistoryIds.push(startHistoryId);
+
+      // Return records with id > startHistoryId
+      const startNum = BigInt(startHistoryId || "0");
+      const matchedRecords = allHistoryRecords.filter((rec) => BigInt(rec.id) > startNum);
+
+      return new Response(JSON.stringify({
+        historyId: "1105",
+        history: matchedRecords,
+        nextPageToken: null,
+      }), { status: 200 });
+    }
+    return new Response("Not found", { status: 404 });
+  };
+
+  try {
+    // -------------------------------------------------------------------------
+    // RUN 1: Initial History API scan starting from historyId 1000 with limit 300
+    // -------------------------------------------------------------------------
+    const run1Sync = await executeGmailSync({
+      token: "mock-token",
+      startHistoryId: "1000",
+      queryAfterEpoch: 1731000000,
+      maxMessages: 300,
+    });
+
+    assert.equal(run1Sync.strategy, "history", "Run 1 must use history strategy");
+    assert.equal(run1Sync.messages.length, 300, "Run 1 must discover exactly 300 messages (60 records * 5)");
+    assert.equal(run1Sync.hasMoreBacklog, true, "Run 1 must flag backlog remaining");
+    assert.equal(run1Sync.latestHistoryId, "1060", "Run 1 latestHistoryId must stop at safe fully consumed record 1060, NOT premature 1105");
+
+    const run1StartedAt = "2026-11-09T10:00:00.000Z";
+    const run1CompletedAt = "2026-11-09T10:01:00.000Z";
+
+    const run1Continuation = computeContinuationState({
+      rawMessageCount: run1Sync.messages.length,
+      maxMessages: 300,
+      hasRemainingPageToken: false,
+      queryAfterEpoch: 1731000000,
+      isResumingBackfill: false,
+      startedAt: run1StartedAt,
+      completedAt: run1CompletedAt,
+      dryRun: false,
+      syncStrategy: "history",
+      lastConsumedHistoryRecordId: run1Sync.latestHistoryId,
+    });
+
+    assert.equal(run1Continuation.hasMoreBacklog, true);
+    assert.equal(run1Continuation.checkpointAdvanced, false, "Checkpoint MUST NOT advance when backlog remains");
+    assert.equal(run1Continuation.status, "partial_backfill");
+    assert.equal(run1Continuation.continuationStrategy, "history", "Continuation strategy MUST be persisted as history");
+    assert.equal(run1Continuation.lastConsumedHistoryRecordId, "1060");
+    assert.equal(run1Continuation.nextContinuationBeforeEpoch, null, "Must NOT set continuation_before_epoch for history continuation");
+    assert.equal(run1Continuation.nextContinuationAfterEpoch, null, "Must NOT set continuation_after_epoch for history continuation");
+    assert.equal(run1Continuation.effectiveCheckpointTime, null, "Must NOT set checkpoint time");
+
+    // Commit Run 1 in ingestion_only mode atomically
+    await sql.begin(async (tx) => {
+      const enq = await enqueueDiscoveredMessages(tx, run1Sync.messages.map((m, idx) => ({
+        owner_id: "f2729195-5445-4272-ab85-cac5b03b0967",
+        mailbox: "govardhanreddy.vys7@gmail.com",
+        message_id: m.id,
+        message_timestamp: new Date(1731050000 * 1000 + idx * 1000).toISOString(),
+        processing_status: "pending",
+        content_hash: `hash_${m.id}`,
+      })));
+      assert.equal(enq.newlyEnqueued, 300);
+
+      // Invariant: Because checkpointAdvanced is false, cursor last_success_at MUST NOT advance!
+      // But last_history_id advances to safe record 1060 for unattended resumption.
+      const safePartialHistoryId = run1Sync.latestHistoryId;
+      await tx`
+        insert into jobbot.sync_cursors (
+          owner_id, source_key, last_success_at, last_observed_at,
+          last_history_id, overlap_minutes, initial_lookback_hours
+        ) values (
+          ${"f2729195-5445-4272-ab85-cac5b03b0967"}, ${"gmail_status_ingestion"},
+          ${null}, ${run1CompletedAt},
+          ${safePartialHistoryId}, ${15}, ${72}
+        )
+      `;
+
+      // Persist production sync log with exact continuation state
+      await tx`
+        insert into jobbot.sync_logs (
+          run_id, bot_name, started_at, completed_at,
+          created_count, updated_count, skipped_count,
+          errors, verification_results
+        ) values (
+          ${"run-1-uuid"}, ${"Gmail Status Agent"}, ${run1StartedAt}, ${run1CompletedAt},
+          ${300}, ${0}, ${0},
+          ${[]},
+          ${{
+            status: run1Continuation.status,
+            mode: "ingestion_only",
+            dry_run: false,
+            sync_strategy: "history",
+            continuation_strategy: run1Continuation.continuationStrategy,
+            start_history_id: "1000",
+            latest_history_id: "1060",
+            last_consumed_history_record_id: "1060",
+            has_more_backlog: true,
+            checkpoint_advanced: false,
+            continuation_before_epoch: null,
+            continuation_after_epoch: null,
+            messages_discovered: 300,
+            messages_enqueued: 300,
+          }}
+        )
+      `;
+    });
+
+    assert.equal(table.size, 300, "Queue must contain exactly 300 committed rows from Run 1");
+    const cursorAfterRun1 = cursors.get("f2729195-5445-4272-ab85-cac5b03b0967:gmail_status_ingestion");
+    assert.equal(cursorAfterRun1.last_history_id, "1060", "Cursor historyId must advance to safe consumed record 1060");
+    assert.equal(cursorAfterRun1.last_success_at, null, "Cursor last_success_at MUST NOT advance during partial run");
+    assert.equal(applications.get("app-test-500").hiring_stage, "Under Review", "Application status MUST remain unmodified");
+
+    // -------------------------------------------------------------------------
+    // RUN 2: Unattended next run (no manual parameters)
+    // -------------------------------------------------------------------------
+    const run1Log = syncLogs[0];
+    const run2ScanWindow = resolveScanWindow({
+      latestProductionLog: {
+        started_at: run1Log.startedAt,
+        completed_at: run1Log.completedAt,
+        verification_results: run1Log.verificationResults,
+      },
+      cursorRecord: cursorAfterRun1,
+      gapReconcile: false,
+      lastVerifiedCheckpoint: "2026-11-08T22:47:41Z",
+      overlapMinutes: 15,
+    });
+
+    // Invariant: Unattended run MUST resume via History API, NOT full search!
+    assert.equal(run2ScanWindow.isResumingBackfill, false, "Must NOT mark as full search backfill");
+    assert.equal(run2ScanWindow.syncStrategy, "history", "Must preserve history strategy");
+    assert.equal(run2ScanWindow.startHistoryId, "1060", "Must resume strictly from record 1060");
+    assert.equal(run2ScanWindow.queryBeforeEpoch, null, "Must NOT constrain by beforeEpoch");
+
+    const run2Sync = await executeGmailSync({
+      token: "mock-token",
+      startHistoryId: run2ScanWindow.startHistoryId,
+      queryAfterEpoch: run2ScanWindow.queryAfterEpoch,
+      queryBeforeEpoch: run2ScanWindow.queryBeforeEpoch,
+      isResumingBackfill: run2ScanWindow.isResumingBackfill,
+      maxMessages: 300,
+    });
+
+    assert.equal(run2Sync.strategy, "history", "Run 2 must execute history sync");
+    assert.equal(fullSearchApiCallCount, 0, "Full search API MUST NOT be called");
+    assert.equal(requestedStartHistoryIds.includes("1060"), true, "Gmail API must be called with startHistoryId=1060");
+    assert.equal(run2Sync.messages.length, 200, "Run 2 must discover remaining 200 messages (records 1061 to 1100)");
+    assert.equal(run2Sync.hasMoreBacklog, false, "Backlog is now completely consumed");
+    assert.equal(run2Sync.latestHistoryId, "1105", "Final history ID advances to mailbox latest historyId 1105");
+
+    // Verify label-change messages were captured
+    const run2LabelChanges = run2Sync.messages.filter((m) => m.id.startsWith("msg_hist_lbl_"));
+    assert.equal(run2LabelChanges.length, 80, "Must capture all 80 label-change messages in records 1061-1100");
+
+    // Verify rollback on failure during Run 2
+    let rollbackThrown = false;
+    try {
+      await sql.begin(async (tx) => {
+        await enqueueDiscoveredMessages(tx, [
+          {
+            owner_id: "f2729195-5445-4272-ab85-cac5b03b0967",
+            mailbox: "govardhanreddy.vys7@gmail.com",
+            message_id: "FORCE_TRANSACTION_FAIL",
+            message_timestamp: new Date().toISOString(),
+            processing_status: "pending",
+            content_hash: "hash_fail",
+          },
+        ]);
+      });
+    } catch (err) {
+      rollbackThrown = true;
+    }
+    assert.equal(rollbackThrown, true, "Transaction failure must throw");
+    assert.equal(table.size, 300, "Database state must cleanly roll back to Run 1 state (300 rows)");
+    assert.equal(cursors.get("f2729195-5445-4272-ab85-cac5b03b0967:gmail_status_ingestion").last_history_id, "1060");
+
+    // Commit Run 2 successfully
+    const run2StartedAt = "2026-11-09T11:00:00.000Z";
+    const run2CompletedAt = "2026-11-09T11:01:00.000Z";
+
+    const run2Continuation = computeContinuationState({
+      rawMessageCount: run2Sync.messages.length,
+      maxMessages: 300,
+      hasRemainingPageToken: false,
+      queryAfterEpoch: run2ScanWindow.queryAfterEpoch,
+      isResumingBackfill: false,
+      startedAt: run2StartedAt,
+      completedAt: run2CompletedAt,
+      dryRun: false,
+      syncStrategy: "history",
+      lastConsumedHistoryRecordId: run2Sync.latestHistoryId,
+    });
+
+    assert.equal(run2Continuation.hasMoreBacklog, false);
+    assert.equal(run2Continuation.checkpointAdvanced, true, "Checkpoint MUST advance now that backlog is complete");
+    assert.equal(run2Continuation.status, "completed");
+    assert.equal(run2Continuation.continuationStrategy, "history");
+    assert.equal(run2Continuation.lastConsumedHistoryRecordId, "1105");
+
+    await sql.begin(async (tx) => {
+      const enq = await enqueueDiscoveredMessages(tx, run2Sync.messages.map((m, idx) => ({
+        owner_id: "f2729195-5445-4272-ab85-cac5b03b0967",
+        mailbox: "govardhanreddy.vys7@gmail.com",
+        message_id: m.id,
+        message_timestamp: new Date(1731050000 * 1000 + (300 + idx) * 1000).toISOString(),
+        processing_status: "pending",
+        content_hash: `hash_${m.id}`,
+      })));
+      assert.equal(enq.newlyEnqueued, 200);
+      assert.equal(enq.duplicatesSkipped, 0);
+
+      // Advance cursor now that backlog is complete
+      await tx`
+        insert into jobbot.sync_cursors (
+          owner_id, source_key, last_success_at, last_observed_at,
+          last_history_id, overlap_minutes, initial_lookback_hours
+        ) values (
+          ${"f2729195-5445-4272-ab85-cac5b03b0967"}, ${"gmail_status_ingestion"},
+          ${run2CompletedAt}, ${run2CompletedAt},
+          ${run2Sync.latestHistoryId}, ${15}, ${72}
+        )
+      `;
+    });
+
+    // Invariant verifications:
+    // 1. Total 500 rows committed in queue
+    assert.equal(table.size, 500, "Queue must contain exactly 500 total messages across both runs");
+
+    // 2. 0 duplicate messages
+    const allMessageIds = Array.from(table.values()).map((r) => r.message_id);
+    const uniqueIds = new Set(allMessageIds);
+    assert.equal(uniqueIds.size, 500, "All 500 message IDs must be completely unique with 0 duplicates");
+
+    // 3. Final cursor advanced
+    const finalCursor = cursors.get("f2729195-5445-4272-ab85-cac5b03b0967:gmail_status_ingestion");
+    assert.equal(finalCursor.last_history_id, "1105", "Cursor historyId must advance to 1105");
+    assert.equal(finalCursor.last_success_at, run2CompletedAt, "Cursor last_success_at must advance to completion time");
+
+    // 4. Zero application status updates
+    assert.equal(applications.get("app-test-500").hiring_stage, "Under Review", "Application status MUST remain unmodified throughout");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

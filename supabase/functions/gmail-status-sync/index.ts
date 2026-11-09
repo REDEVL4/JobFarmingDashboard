@@ -690,6 +690,8 @@ Deno.serve(async (req) => {
       startedAt,
       completedAt,
       dryRun,
+      syncStrategy: syncResult.strategy,
+      lastConsumedHistoryRecordId: syncResult.strategy === "history" ? syncResult.latestHistoryId : null,
     });
 
     // 11. DIAGNOSTIC DRY-RUN EXECUTION BRANCH
@@ -706,8 +708,10 @@ Deno.serve(async (req) => {
         dry_run: true,
         mailbox: OWNER_EMAIL,
         sync_strategy: syncResult.strategy,
+        continuation_strategy: continuation.continuationStrategy,
         start_history_id: scanWindow.startHistoryId || null,
         latest_history_id: latestHistoryId || null,
+        last_consumed_history_record_id: continuation.lastConsumedHistoryRecordId,
         history_expired_recovered: syncResult.historyExpiredRecovered || false,
         run_kind: scanWindow.isResumingBackfill
           ? "backfill_continuation_dry_run"
@@ -793,11 +797,15 @@ Deno.serve(async (req) => {
         },
         hasMoreBacklog: continuation.hasMoreBacklog,
         checkpointAdvanced: false,
+        continuationStrategy: continuation.continuationStrategy,
+        lastConsumedHistoryRecordId: continuation.lastConsumedHistoryRecordId,
         continuation: continuation.hasMoreBacklog ? {
+          strategy: continuation.continuationStrategy,
           beforeEpoch: continuation.nextContinuationBeforeEpoch,
           afterEpoch: continuation.nextContinuationAfterEpoch,
           ceilingTime: continuation.nextContinuationCeilingTime,
           pageToken: pageToken || undefined,
+          lastConsumedHistoryRecordId: continuation.lastConsumedHistoryRecordId,
         } : null,
       };
 
@@ -881,8 +889,10 @@ Deno.serve(async (req) => {
         dry_run: false,
         mailbox: OWNER_EMAIL,
         sync_strategy: syncResult.strategy,
+        continuation_strategy: continuation.continuationStrategy,
         start_history_id: scanWindow.startHistoryId || null,
         latest_history_id: latestHistoryId || null,
+        last_consumed_history_record_id: continuation.lastConsumedHistoryRecordId,
         start_history_snapshot: syncResult.startHistorySnapshot || null,
         history_expired_recovered: syncResult.historyExpiredRecovered || false,
         run_kind: scanWindow.isResumingBackfill
@@ -942,11 +952,15 @@ Deno.serve(async (req) => {
       reviewsQueued: 0,
       hasMoreBacklog: continuation.hasMoreBacklog,
       checkpointAdvanced: continuation.checkpointAdvanced,
+      continuationStrategy: continuation.continuationStrategy,
+      lastConsumedHistoryRecordId: continuation.lastConsumedHistoryRecordId,
       continuation: continuation.hasMoreBacklog ? {
+        strategy: continuation.continuationStrategy,
         beforeEpoch: continuation.nextContinuationBeforeEpoch,
         afterEpoch: continuation.nextContinuationAfterEpoch,
         ceilingTime: continuation.nextContinuationCeilingTime,
         pageToken: pageToken || undefined,
+        lastConsumedHistoryRecordId: continuation.lastConsumedHistoryRecordId,
       } : null,
       completedAt,
     });

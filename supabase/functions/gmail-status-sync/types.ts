@@ -136,10 +136,12 @@ export interface IngestionCheckpoint {
   last_scan_at: string;
   sync_strategy: "history" | "query_full" | "gap_reconciliation";
   has_more_backlog: boolean;
+  continuation_strategy?: "history" | "query_full" | "gap_reconciliation";
   continuation_before_epoch?: number | null;
   continuation_after_epoch?: number | null;
   continuation_ceiling_time?: string | null;
   continuation_page_token?: string | null;
+  last_consumed_history_record_id?: string | null;
 }
 
 export interface AnalysisCheckpoint {
@@ -190,11 +192,15 @@ export interface SyncRunResult {
   ignoredMessages: string[];
   checkpointAdvanced: boolean;
   hasMoreBacklog?: boolean;
+  continuationStrategy?: "history" | "query_full" | "gap_reconciliation";
+  lastConsumedHistoryRecordId?: string | null;
   continuation?: {
+    strategy?: "history" | "query_full" | "gap_reconciliation";
     beforeEpoch?: number | null;
     afterEpoch?: number | null;
     ceilingTime?: string | null;
     pageToken?: string | null;
+    lastConsumedHistoryRecordId?: string | null;
   } | null;
   errors: Array<{ code: string; detail?: string }>;
   details?: {
