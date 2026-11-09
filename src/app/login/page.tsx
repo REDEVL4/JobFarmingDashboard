@@ -2,26 +2,28 @@
 
 import React, { useState, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ShieldCheck, Lock, Mail, ArrowRight, AlertCircle, CheckCircle2 } from "lucide-react";
+import { ShieldCheck, Lock, Mail, ArrowRight, AlertCircle } from "lucide-react";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { createClient } from "@/lib/supabase/client";
 
+const DESIGNATED_OWNER_UUID = "f2729195-5445-4272-ab85-cac5b03b0967";
+
 function LoginContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const unauthorizedError = searchParams.get("error") === "unauthorized_owner";
+  const errorCode = searchParams.get("error");
 
   const [email, setEmail] = useState("govardhanreddy.vys7@gmail.com");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
-    setMessage(null);
+    setErrorMessage(null);
 
     try {
       const supabase = createClient();
@@ -31,16 +33,29 @@ function LoginContent() {
       });
 
       if (error) {
-        // In local preview mode without a configured live auth session, allow owner entry
-        setMessage(`Sign-in note: ${error.message}. Entering Owner Preview mode.`);
-        setTimeout(() => {
-          router.push("/");
-        }, 1000);
-      } else if (data?.user) {
-        router.push("/");
+        // Fail-closed: Never allow bypass on error
+        setErrorMessage(`Authentication failed: ${error.message}`);
+        return;
       }
-    } catch {
+
+      if (!data?.user) {
+        setErrorMessage("Authentication failed: No user session returned.");
+        return;
+      }
+
+      // Verify that the authenticated user is the designated owner
+      if (data.user.id !== DESIGNATED_OWNER_UUID) {
+        await supabase.auth.signOut();
+        setErrorMessage("Access denied: You are not the authorized owner of this command center.");
+        return;
+      }
+
+      // Authenticated owner confirmed
       router.push("/");
+      router.refresh();
+    } catch (err: any) {
+      // Fail-closed: Always stay on login page on any exception
+      setErrorMessage(`Authentication error: ${err?.message || "An unexpected error occurred."}`);
     } finally {
       setLoading(false);
     }
@@ -68,10 +83,24 @@ function LoginContent() {
 
         <form onSubmit={handleSignIn}>
           <CardContent className="space-y-4 text-xs">
-            {unauthorizedError && (
+            {errorCode === "unauthorized_owner" && (
               <div className="p-3 rounded-lg border border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-400 flex items-start gap-2">
                 <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
                 <span>Access denied: The authenticated user is not the designated owner.</span>
+              </div>
+            )}
+
+            {errorCode === "missing_credentials" && (
+              <div className="p-3 rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400 flex items-start gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                <span>Configuration notice: Supabase credentials are missing or unconfigured. Access is locked.</span>
+              </div>
+            )}
+
+            {errorMessage && (
+              <div className="p-3 rounded-lg border border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-400 flex items-start gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                <span>{errorMessage}</span>
               </div>
             )}
 
@@ -99,29 +128,21 @@ function LoginContent() {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   className="pl-9 text-xs h-9"
+                  required
                 />
               </div>
             </div>
-
-            {message && (
-              <div className="p-3 rounded-lg bg-muted text-foreground text-xs">
-                {message}
-              </div>
-            )}
           </CardContent>
 
-          <CardFooter className="flex flex-col gap-2 pt-2">
+          <CardFooter className="pt-2">
             <Button
               type="submit"
+              className="w-full text-xs h-9 bg-brand-600 hover:bg-brand-700 text-white font-medium"
               disabled={loading}
-              className="w-full h-9 text-xs bg-brand-600 hover:bg-brand-700 text-white"
             >
-              <span>{loading ? "Authenticating..." : "Authenticate as Owner"}</span>
-              <ArrowRight className="h-3.5 w-3.5 ml-1.5" />
+              {loading ? "Verifying Credentials..." : "Authenticate as Owner"}
+              <ArrowRight className="h-4 w-4 ml-1.5" />
             </Button>
-            <p className="text-[11px] text-muted-foreground text-center">
-              Owner identity is strictly bound to UUID <code className="font-mono">f2729195-5445-4272-ab85-cac5b03b0967</code>.
-            </p>
           </CardFooter>
         </form>
       </Card>
@@ -131,9 +152,8 @@ function LoginContent() {
 
 export default function LoginPage() {
   return (
-    <Suspense fallback={<div className="min-h-[70vh] flex items-center justify-center text-xs text-muted-foreground">Loading sign-in form...</div>}>
+    <Suspense fallback={<div className="p-8 text-center text-xs text-muted-foreground">Loading login...</div>}>
       <LoginContent />
     </Suspense>
   );
 }
-

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   Users,
   ShieldAlert,
@@ -14,20 +14,38 @@ import {
   X,
   ExternalLink,
   Lock,
+  Inbox,
 } from "lucide-react";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { INITIAL_OUTREACH_CONTACTS } from "@/lib/supabase/mock-data";
+import { fetchOutreachStats } from "@/lib/data-service";
 import type { DbOutreachContact } from "@/types/database";
 
 export default function OutreachPage() {
-  const [contacts, setContacts] = useState<DbOutreachContact[]>(INITIAL_OUTREACH_CONTACTS);
+  const [contacts, setContacts] = useState<DbOutreachContact[]>([]);
+  const [loading, setLoading] = useState(true);
   const [activeFilter, setActiveFilter] = useState<string>("all");
+
+  useEffect(() => {
+    async function loadData() {
+      try {
+        const stats = await fetchOutreachStats();
+        setContacts(stats.contacts || []);
+      } catch (err) {
+        console.error("Failed to load outreach contacts:", err);
+        setContacts([]);
+      } finally {
+        setLoading(false);
+      }
+    }
+    loadData();
+  }, []);
 
   const pendingCount = contacts.filter((c) => c.status === "draft_pending_approval").length;
   const approvedCount = contacts.filter((c) => c.status === "approved").length;
 
   const handleApprove = (id: string) => {
+    // Client-side state transition in preview mode (read-only safe)
     setContacts((prev) =>
       prev.map((c) => (c.id === id ? { ...c, status: "approved" as const } : c))
     );
@@ -85,7 +103,7 @@ export default function OutreachPage() {
           <CardContent className="p-4 space-y-1">
             <span className="text-xs font-semibold text-muted-foreground">Prospects Identified</span>
             <div className="text-2xl font-bold text-foreground">{contacts.length}</div>
-            <p className="text-[11px] text-muted-foreground">All at companies with applications</p>
+            <p className="text-[11px] text-muted-foreground">Real prospects in database</p>
           </CardContent>
         </Card>
 
@@ -119,7 +137,7 @@ export default function OutreachPage() {
         <CardHeader className="border-b pb-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
-              <CardTitle className="text-base font-semibold">Phase 1 Outreach Review Queue</CardTitle>
+              <CardTitle className="text-base font-semibold">Outreach Review Queue</CardTitle>
               <CardDescription className="text-xs">
                 Personalized notes tailored to each prospect&apos;s recent hiring posts (under 300 characters)
               </CardDescription>
@@ -153,103 +171,114 @@ export default function OutreachPage() {
           </div>
         </CardHeader>
         <CardContent className="p-0">
-          <div className="divide-y divide-border">
-            {filteredContacts.map((contact, idx) => (
-              <div key={contact.id} className="p-5 hover:bg-muted/30 transition-colors space-y-4 text-xs">
-                {/* Contact Card Header */}
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-bold text-sm text-foreground">
-                        #{idx + 1} {contact.name}
-                      </span>
-                      <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase tracking-wider bg-brand-500/10 text-brand-600 dark:text-brand-400">
-                        {contact.contact_type}
-                      </span>
-                      {contact.score && (
-                        <span className="text-[10px] px-2 py-0.5 rounded font-bold bg-muted text-foreground">
-                          Fit Score: {contact.score}/100
+          {loading ? (
+            <div className="p-12 text-center text-xs text-muted-foreground">Loading outreach records...</div>
+          ) : filteredContacts.length === 0 ? (
+            <div className="p-12 text-center space-y-2">
+              <Inbox className="h-8 w-8 text-muted-foreground mx-auto" />
+              <p className="text-sm font-semibold text-foreground">No Outreach Contacts</p>
+              <p className="text-xs text-muted-foreground max-w-sm mx-auto">
+                No prospect records matching the selected filter were returned from the database.
+              </p>
+            </div>
+          ) : (
+            <div className="divide-y divide-border">
+              {filteredContacts.map((contact, idx) => (
+                <div key={contact.id} className="p-5 hover:bg-muted/30 transition-colors space-y-4 text-xs">
+                  {/* Contact Card Header */}
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-bold text-sm text-foreground">
+                          #{idx + 1} {contact.name}
                         </span>
+                        <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase tracking-wider bg-brand-500/10 text-brand-600 dark:text-brand-400">
+                          {contact.contact_type}
+                        </span>
+                        {contact.score && (
+                          <span className="text-[10px] px-2 py-0.5 rounded font-bold bg-muted text-foreground">
+                            Fit Score: {contact.score}/100
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 text-muted-foreground">
+                        <Building className="h-3.5 w-3.5" />
+                        <span>{contact.company}</span>
+                        <span>•</span>
+                        <span>{contact.role}</span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      {contact.linkedin_url && (
+                        <a
+                          href={contact.linkedin_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-1 px-2.5 py-1 rounded border text-muted-foreground hover:text-foreground transition-colors font-medium text-[11px]"
+                        >
+                          <Linkedin className="h-3 w-3 text-sky-600" />
+                          <span>View Profile</span>
+                          <ExternalLink className="h-2.5 w-2.5 opacity-60" />
+                        </a>
+                      )}
+
+                      {contact.status === "approved" ? (
+                        <span className="flex items-center gap-1 px-2.5 py-1 rounded bg-emerald-500/10 text-emerald-600 font-semibold text-[11px]">
+                          <Check className="h-3.5 w-3.5" />
+                          Approved
+                        </span>
+                      ) : (
+                        <div className="flex items-center gap-1.5">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => handleReject(contact.id)}
+                            className="h-7 text-xs text-rose-600 hover:text-rose-700 hover:bg-rose-50 dark:hover:bg-rose-950/20"
+                          >
+                            <X className="h-3.5 w-3.5 mr-1" />
+                            Reject
+                          </Button>
+                          <Button
+                            size="sm"
+                            onClick={() => handleApprove(contact.id)}
+                            className="h-7 text-xs bg-emerald-600 hover:bg-emerald-700 text-white"
+                          >
+                            <Check className="h-3.5 w-3.5 mr-1" />
+                            Approve Note
+                          </Button>
+                        </div>
                       )}
                     </div>
-                    <div className="flex items-center gap-2 text-muted-foreground">
-                      <Building className="h-3.5 w-3.5" />
-                      <span>{contact.company}</span>
-                      <span>•</span>
-                      <span>{contact.role}</span>
-                    </div>
                   </div>
 
-                  <div className="flex items-center gap-2">
-                    {contact.status === "draft_pending_approval" ? (
-                      <>
-                        <Button
-                          size="sm"
-                          onClick={() => handleApprove(contact.id)}
-                          className="h-8 text-xs gap-1 bg-emerald-600 hover:bg-emerald-700 text-white"
-                        >
-                          <Check className="h-3.5 w-3.5" />
-                          <span>Approve Draft</span>
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => handleReject(contact.id)}
-                          className="h-8 text-xs gap-1 text-muted-foreground hover:text-rose-600"
-                        >
-                          <X className="h-3.5 w-3.5" />
-                          <span>Dismiss</span>
-                        </Button>
-                      </>
-                    ) : contact.status === "approved" ? (
-                      <span className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-semibold text-xs border border-emerald-500/20">
-                        <CheckCircle2 className="h-3.5 w-3.5" />
-                        Approved for Manual Send
+                  {/* Personalized Connection Note */}
+                  <div className="space-y-1.5 bg-muted/40 p-3.5 rounded-lg border">
+                    <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                      <span className="font-semibold text-foreground flex items-center gap-1.5">
+                        <MessageSquare className="h-3.5 w-3.5 text-brand-500" />
+                        Connection Request Note
                       </span>
-                    ) : (
-                      <span className="text-muted-foreground">Dismissed</span>
-                    )}
-
-                    {contact.linkedin_url && (
-                      <Button variant="ghost" size="icon" className="h-8 w-8" asChild>
-                        <a href={contact.linkedin_url} target="_blank" rel="noreferrer">
-                          <Linkedin className="h-4 w-4 text-sky-600" />
-                        </a>
-                      </Button>
-                    )}
+                      <span
+                        className={`font-mono text-[10px] ${
+                          (contact.connection_note?.length || 0) > 300
+                            ? "text-rose-600 font-bold"
+                            : "text-muted-foreground"
+                        }`}
+                      >
+                        {contact.connection_note?.length || 0}/300 chars
+                      </span>
+                    </div>
+                    <p className="text-foreground leading-relaxed text-xs font-normal">
+                      &quot;{contact.connection_note}&quot;
+                    </p>
                   </div>
                 </div>
-
-                {/* Connection Note Draft Box */}
-                {contact.connection_note && (
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between text-[11px] text-muted-foreground font-semibold">
-                      <span>Personalized Connection Note</span>
-                      <span className="font-mono">{contact.connection_note.length} / 300 chars</span>
-                    </div>
-                    <div className="p-3.5 rounded-lg border bg-card text-foreground font-sans leading-relaxed">
-                      &quot;{contact.connection_note}&quot;
-                    </div>
-                  </div>
-                )}
-
-                {/* Optional Follow-up DM */}
-                {contact.follow_up_note && (
-                  <div className="space-y-1.5">
-                    <span className="text-[11px] text-muted-foreground font-semibold">
-                      Follow-up DM (Send only after connection is accepted)
-                    </span>
-                    <div className="p-3 rounded-lg border bg-muted/40 text-muted-foreground font-sans leading-relaxed text-[11px]">
-                      &quot;{contact.follow_up_note}&quot;
-                    </div>
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </CardContent>
       </Card>
     </div>
   );
 }
-

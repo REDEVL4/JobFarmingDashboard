@@ -1,89 +1,51 @@
 "use client";
 
-import React, { useState, useEffect, Suspense } from "react";
+import React, { useState, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import {
   ShieldCheck,
   ShieldAlert,
   KeyRound,
-  Check,
   X,
-  ExternalLink,
-  Info,
-  Lock,
   AlertTriangle,
-  RotateCcw,
+  Lock,
+  Ban,
 } from "lucide-react";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 
 const OWNER_UUID = "f2729195-5445-4272-ab85-cac5b03b0967";
 
-// Defensible trust policy allowlist for exact redirect URIs
-const TRUSTED_REDIRECT_URIS = [
+// Defensible trust policy allowlist for exact verified redirect URIs
+const VERIFIED_REDIRECT_URIS = [
   "https://grok.com/connectors-oauth-exchange-code/",
   "https://www.cursor.com/agents/mcp/oauth/callback",
 ];
 
+// Recognized standard scopes
+const STANDARD_SCOPES = new Set(["openid", "profile", "email", "offline_access"]);
+
 function ConsentContent() {
   const searchParams = useSearchParams();
   const authorizationId = searchParams.get("authorization_id");
+  const rawClientId = searchParams.get("client_id");
+  const rawRedirectUri = searchParams.get("redirect_uri");
+  const rawScope = searchParams.get("scope");
 
-  const [loading, setLoading] = useState(false);
-  const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const [decisionMade, setDecisionMade] = useState<"approved" | "denied" | null>(null);
+  const [denied, setDenied] = useState(false);
 
-  // Client request details
-  const [clientDetails, setClientDetails] = useState({
-    clientId: searchParams.get("client_id") || "dynamic-registered-client",
-    clientName: searchParams.get("client_name") || "Grok Custom MCP Connector",
-    redirectUri: searchParams.get("redirect_uri") || "https://grok.com/connectors-oauth-exchange-code/",
-    requestedScopes: (searchParams.get("scope") || "openid profile email offline_access").split(" "),
-  });
-
-  const isTrustedRedirect = TRUSTED_REDIRECT_URIS.some((uri) =>
-    clientDetails.redirectUri.startsWith(uri)
+  // Validate redirect URI against strict whitelist
+  const isRedirectValid = Boolean(
+    rawRedirectUri && VERIFIED_REDIRECT_URIS.some((trusted) => rawRedirectUri === trusted)
   );
 
-  const handleDecision = async (approved: boolean) => {
-    setLoading(true);
-    setStatusMessage(approved ? "Processing authorization grant..." : "Processing authorization denial...");
+  // Parse and filter scopes
+  const requestedScopes = rawScope
+    ? rawScope.split(" ").filter((s) => STANDARD_SCOPES.has(s.trim()))
+    : ["openid"];
 
-    try {
-      // In a live Supabase OAuth flow, we call auth.oauth.approveAuthorization or denyAuthorization
-      // with authorization_id. For safety and compliance with the consent protocol:
-      if (!authorizationId) {
-        setStatusMessage("Trial Mode: No authorization_id in URL. Tested local approval logic successfully.");
-        setDecisionMade(approved ? "approved" : "denied");
-        setLoading(false);
-        return;
-      }
-
-      // If live redirect URL exists:
-      const targetRedirect = new URL(clientDetails.redirectUri);
-      if (approved) {
-        targetRedirect.searchParams.set("code", "auth_code_sample_" + Math.random().toString(36).substring(7));
-        if (searchParams.get("state")) {
-          targetRedirect.searchParams.set("state", searchParams.get("state")!);
-        }
-      } else {
-        targetRedirect.searchParams.set("error", "access_denied");
-        targetRedirect.searchParams.set("error_description", "The owner denied access.");
-        if (searchParams.get("state")) {
-          targetRedirect.searchParams.set("state", searchParams.get("state")!);
-        }
-      }
-
-      setDecisionMade(approved ? "approved" : "denied");
-      setStatusMessage(`Redirecting to ${targetRedirect.origin}...`);
-      
-      setTimeout(() => {
-        window.location.replace(targetRedirect.toString());
-      }, 1200);
-    } catch (err: any) {
-      setStatusMessage(`Decision error: ${err?.message || "Failed to finalize decision"}`);
-      setLoading(false);
-    }
+  const handleDeny = () => {
+    setDenied(true);
   };
 
   return (
@@ -102,18 +64,31 @@ function ConsentContent() {
 
         <CardHeader className="space-y-1 pb-4">
           <CardTitle className="text-xl font-bold text-foreground">
-            Connect to Job Farming OS
+            Supabase OAuth Server Authorization
           </CardTitle>
           <CardDescription className="text-xs">
-            An external agent is requesting authorization to interact with your recruitment database via Supabase MCP.
+            Review the incoming connection request to interact with your Supabase backend.
           </CardDescription>
         </CardHeader>
 
         <CardContent className="space-y-5 text-xs">
-          {/* Owner Identity Check */}
+          {/* Production Configuration Lock Banner */}
+          <div className="p-4 rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-900 dark:text-amber-300 space-y-1.5">
+            <div className="flex items-center gap-2 font-bold text-xs">
+              <Ban className="h-4 w-4 text-amber-600 dark:text-amber-400 shrink-0" />
+              <span>OAuth Grant Disabled: Live Configuration Required</span>
+            </div>
+            <p className="text-[11px] leading-relaxed">
+              Live authorization code issuance requires a verified registered client in Supabase OAuth Server.
+              Per production security policy, simulated authorization codes (<code className="font-mono">Math.random()</code>)
+              and unverified dynamic client approvals are strictly prohibited. Approval is disabled until Supabase OAuth Server registration is finalized.
+            </p>
+          </div>
+
+          {/* Owner Identity Verification */}
           <div className="p-3.5 rounded-xl border bg-muted/40 flex items-center justify-between">
             <div className="space-y-0.5">
-              <span className="text-[11px] text-muted-foreground block font-medium">Authenticated Owner</span>
+              <span className="text-[11px] text-muted-foreground block font-medium">Designated Owner</span>
               <span className="font-semibold text-foreground">Govardhan Reddy Narala</span>
               <span className="font-mono text-[10px] text-muted-foreground block truncate max-w-xs">
                 UUID: {OWNER_UUID}
@@ -121,43 +96,39 @@ function ConsentContent() {
             </div>
             <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400 font-semibold text-xs">
               <ShieldCheck className="h-4 w-4" />
-              Verified
+              Verified Owner
             </span>
           </div>
 
-          {/* Requesting Client Metadata */}
+          {/* Client & Redirect Verification */}
           <div className="space-y-2">
             <h4 className="font-semibold text-foreground uppercase tracking-wider text-[11px]">
-              Client & Redirect Verification
+              Client & Redirect URI Verification
             </h4>
             <div className="p-3.5 rounded-xl border bg-card space-y-2.5">
               <div className="flex justify-between items-center">
-                <span className="text-muted-foreground">Client Name:</span>
-                <span className="font-semibold text-foreground">{clientDetails.clientName}</span>
-              </div>
-              <div className="flex justify-between items-center">
                 <span className="text-muted-foreground">Client ID:</span>
                 <span className="font-mono text-[11px] text-foreground truncate max-w-xs">
-                  {clientDetails.clientId}
+                  {rawClientId ? rawClientId : "Not Provided (Unregistered)"}
                 </span>
               </div>
               <div className="flex justify-between items-center">
                 <span className="text-muted-foreground">Redirect URI:</span>
                 <span className="font-mono text-[11px] text-foreground truncate max-w-xs">
-                  {clientDetails.redirectUri}
+                  {rawRedirectUri ? rawRedirectUri : "Not Provided"}
                 </span>
               </div>
               <div className="flex justify-between items-center pt-1 border-t">
-                <span className="text-muted-foreground">Trust Policy Check:</span>
-                {isTrustedRedirect ? (
+                <span className="text-muted-foreground">Redirect Trust Status:</span>
+                {isRedirectValid ? (
                   <span className="text-emerald-600 dark:text-emerald-400 font-semibold flex items-center gap-1">
-                    <Check className="h-3.5 w-3.5" />
-                    Whitelisted Grok / Cursor URI
+                    <ShieldCheck className="h-3.5 w-3.5" />
+                    Exact Whitelisted Callback URI
                   </span>
                 ) : (
                   <span className="text-rose-600 font-semibold flex items-center gap-1">
-                    <AlertTriangle className="h-3.5 w-3.5" />
-                    Unverified Redirect Domain
+                    <ShieldAlert className="h-3.5 w-3.5" />
+                    Unverified / Disallowed Redirect URI
                   </span>
                 )}
               </div>
@@ -167,10 +138,10 @@ function ConsentContent() {
           {/* Scopes Requested */}
           <div className="space-y-2">
             <h4 className="font-semibold text-foreground uppercase tracking-wider text-[11px]">
-              Requested Permission Scopes
+              Requested Permission Scopes (Standardized)
             </h4>
             <div className="grid grid-cols-2 gap-2">
-              {clientDetails.requestedScopes.map((scope) => (
+              {requestedScopes.map((scope) => (
                 <div
                   key={scope}
                   className="p-2.5 rounded-lg border bg-muted/30 flex items-center gap-2"
@@ -182,22 +153,21 @@ function ConsentContent() {
             </div>
           </div>
 
-          {/* Explicit Warning: MCP Tool Capability */}
-          <div className="p-3.5 rounded-xl border border-amber-500/30 bg-amber-500/5 text-amber-800 dark:text-amber-300 space-y-1">
-            <div className="flex items-center gap-1.5 font-bold">
-              <AlertTriangle className="h-4 w-4 text-amber-500" />
-              <span>Security Notice: Mutating Tool Capabilities</span>
+          {/* Mutating Tool Security Notice */}
+          <div className="p-3.5 rounded-xl border border-destructive/20 bg-destructive/5 text-foreground space-y-1">
+            <div className="flex items-center gap-1.5 font-bold text-xs text-rose-600 dark:text-rose-400">
+              <AlertTriangle className="h-4 w-4 shrink-0" />
+              <span>MCP Tool Guard Warning</span>
             </div>
-            <p className="text-[11px] leading-relaxed">
-              Granting access allows the client to invoke MCP tools associated with your owner account.
-              While <code className="font-mono">runtime_status</code> is read-only, mutating tools such as <code className="font-mono">claim_work</code> and <code className="font-mono">complete_work</code> can update application records in Supabase. Access is NEVER granted automatically.
+            <p className="text-[11px] text-muted-foreground leading-relaxed">
+              Approved OAuth tokens permit clients to invoke MCP endpoints. Mutating tools (<code className="font-mono text-foreground">claim_work</code>, <code className="font-mono text-foreground">complete_work</code>) can modify Supabase database records. Authorization must never be granted automatically or fabricated.
             </p>
           </div>
 
-          {/* Status message */}
-          {statusMessage && (
-            <div className="p-3 rounded-lg bg-muted text-foreground text-center font-medium">
-              {statusMessage}
+          {/* Denial confirmation */}
+          {denied && (
+            <div className="p-3.5 rounded-xl border border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-400 font-medium text-center">
+              Authorization denied. Request has been rejected. You may close this tab.
             </div>
           )}
         </CardContent>
@@ -205,8 +175,8 @@ function ConsentContent() {
         <CardFooter className="p-6 border-t bg-muted/20 flex flex-col sm:flex-row items-center justify-between gap-3">
           <Button
             variant="outline"
-            onClick={() => handleDecision(false)}
-            disabled={loading || decisionMade !== null}
+            onClick={handleDeny}
+            disabled={denied}
             className="w-full sm:w-auto h-9 text-xs text-rose-600 hover:text-rose-700 hover:bg-rose-50 dark:hover:bg-rose-950/20"
           >
             <X className="h-4 w-4 mr-1.5" />
@@ -214,12 +184,10 @@ function ConsentContent() {
           </Button>
 
           <Button
-            onClick={() => handleDecision(true)}
-            disabled={loading || decisionMade !== null}
-            className="w-full sm:w-auto h-9 text-xs bg-brand-600 hover:bg-brand-700 text-white shadow-sm"
+            disabled={true}
+            className="w-full sm:w-auto h-9 text-xs bg-muted text-muted-foreground cursor-not-allowed shadow-none"
           >
-            <Check className="h-4 w-4 mr-1.5" />
-            Approve & Issue Authorization Code
+            Approval Unavailable (Config Required)
           </Button>
         </CardFooter>
       </Card>
@@ -234,4 +202,3 @@ export default function ConsentPage() {
     </Suspense>
   );
 }
-
