@@ -325,9 +325,13 @@ function ConsentContent() {
                     <span className="text-muted-foreground">Registration Status:</span>
                     <span className="text-[11px] font-medium text-foreground">
                       {clientTrust?.trusted ? (
-                        <span className="text-emerald-600 dark:text-emerald-400 font-semibold">Authorized Grok Connector</span>
+                        <span className="text-emerald-600 dark:text-emerald-400 font-semibold">
+                          {clientTrust.isDynamicRegistration
+                            ? "Dynamic Grok Registration (Interactive Consent Required)"
+                            : "Approved Grok Connector"}
+                        </span>
                       ) : clientTrust?.isPendingApproval ? (
-                        <span className="text-amber-600 dark:text-amber-400 font-semibold">Dynamic Registration (Owner Allowlist Required)</span>
+                        <span className="text-amber-600 dark:text-amber-400 font-semibold">Dynamic Registration (Owner Approval Required)</span>
                       ) : (
                         <span className="text-rose-600 font-semibold">Untrusted / Disallowed Client</span>
                       )}

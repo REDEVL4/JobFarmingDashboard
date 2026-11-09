@@ -17,8 +17,44 @@ import {
   validateAutoRedirectUrl,
 } from "../../src/lib/oauth-validation.ts";
 
-// Helper for simulating MCP pipeline authorization
-function evaluateMcpAuth(jwtClaims, toolName = "runtime_status") {
+// Mock database store for server-side client & consent validation
+const MOCK_REGISTERED_CLIENTS = new Map([
+  [ACTIVE_GROK_CLIENT_ID, { name: "Grok", redirect_uris: VERIFIED_GROK_CALLBACK_URI, deleted_at: null }],
+  ["b54de595-6bce-4298-836c-2b46a2595904", { name: "Grok", redirect_uris: VERIFIED_GROK_CALLBACK_URI, deleted_at: null }],
+  ["36ece66e-9691-4aeb-a129-2ba5cd9a39ce", { name: "Grok", redirect_uris: VERIFIED_GROK_CALLBACK_URI, deleted_at: null }],
+  ["7a493089-0500-4b0d-8a00-12140c16ac52", { name: "Cursor", redirect_uris: "https://www.cursor.com/agents/mcp/oauth/callback", deleted_at: null }],
+  ["evil-client-uuid-000000000001", { name: "Grok", redirect_uris: "https://evil.attacker.com/callback", deleted_at: null }],
+]);
+
+// Mock consents store: Map<`${userId}:${clientId}`, { revoked_at: Date | null }>
+const MOCK_ACTIVE_CONSENTS = new Map([
+  [`${DESIGNATED_OWNER_UUID}:${ACTIVE_GROK_CLIENT_ID}`, { scopes: "openid email", granted_at: new Date(), revoked_at: null }],
+]);
+
+// Helper simulating jobbot.validate_grok_oauth_client(p_client_id, p_user_id)
+function evaluateServerSideValidator(clientId, userId, consentsStore = MOCK_ACTIVE_CONSENTS) {
+  if (userId !== DESIGNATED_OWNER_UUID) return false;
+  if (!clientId || typeof clientId !== "string") return false;
+
+  const client = MOCK_REGISTERED_CLIENTS.get(clientId);
+  if (!client || client.deleted_at !== null) return false;
+
+  // Strict callback check
+  const uris = client.redirect_uris.split(",").map((u) => u.trim());
+  if (!uris.includes(VERIFIED_GROK_CALLBACK_URI)) return false;
+
+  // Expected client name check
+  if (!/^Grok/i.test(client.name)) return false;
+
+  // Active unrevoked owner consent check
+  const consent = consentsStore.get(`${userId}:${clientId}`);
+  if (!consent || consent.revoked_at !== null) return false;
+
+  return true;
+}
+
+// Helper for simulating MCP pipeline authorization with single source of truth validator
+function evaluateMcpAuth(jwtClaims, toolName = "runtime_status", consentsStore = MOCK_ACTIVE_CONSENTS) {
   if (jwtClaims?.sub !== DESIGNATED_OWNER_UUID) {
     return { allowed: false, status: 403, error: "Owner authentication required" };
   }
@@ -30,9 +66,13 @@ function evaluateMcpAuth(jwtClaims, toolName = "runtime_status") {
   if (!clientId || typeof clientId !== "string" || !UUID_REGEX.test(clientId)) {
     return { allowed: false, status: 403, error: "Present and valid OAuth client_id required" };
   }
-  if (!TRUSTED_OAUTH_CLIENT_IDS.has(clientId)) {
+
+  // Database-enforced client validation
+  const isAuthorized = evaluateServerSideValidator(clientId, jwtClaims.sub, consentsStore);
+  if (!isAuthorized) {
     return { allowed: false, status: 403, error: "Unauthorized OAuth client" };
   }
+
   // Enforce read-only tool restriction for OAuth tokens
   if (toolName !== "runtime_status") {
     return {
@@ -117,27 +157,24 @@ test("OAuth: rejects missing, null, empty, and non-UUID client IDs", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 2. Unknown Client ID with Correct Grok Callback
+// 2. Mismatched Client Metadata or Callback Rejection
 // ---------------------------------------------------------------------------
-test("OAuth: rejects unknown client ID even if present with verified Grok callback", () => {
-  const unknownClient = {
-    id: "99999999-9999-9999-9999-999999999999",
-    name: "Grok",
+test("OAuth: rejects clients with mismatched name or metadata even with Grok callback", () => {
+  const cursorClient = {
+    id: "3a6b0c2a-51fb-43c8-8625-3056092fad8e",
+    name: "Cursor",
   };
-  const res = validateOAuthClient(unknownClient, VERIFIED_GROK_CALLBACK_URI);
+  const res = validateOAuthClient(cursorClient, VERIFIED_GROK_CALLBACK_URI);
   assert.equal(res.trusted, false);
-  assert.equal(res.isPendingApproval, true);
-  assert.match(res.reason, /not in the active authorized allowlist/);
+  assert.match(res.reason, /Mismatched client metadata/);
 
-  // MCP rejects unknown client ID
-  const mcpRes = evaluateMcpAuth({
-    sub: DESIGNATED_OWNER_UUID,
-    role: "authenticated",
-    client_id: unknownClient.id,
-  });
-  assert.equal(mcpRes.allowed, false);
-  assert.equal(mcpRes.status, 403);
-  assert.match(mcpRes.error, /Unauthorized OAuth client/);
+  const maliciousClient = {
+    id: "99999999-9999-9999-9999-999999999999",
+    name: "MaliciousApp",
+  };
+  const resMalicious = validateOAuthClient(maliciousClient, VERIFIED_GROK_CALLBACK_URI);
+  assert.equal(resMalicious.trusted, false);
+  assert.match(resMalicious.reason, /Mismatched client metadata/);
 });
 
 // ---------------------------------------------------------------------------
@@ -170,7 +207,7 @@ test("OAuth: rejects trusted client ID when presenting incorrect or unauthorized
 });
 
 // ---------------------------------------------------------------------------
-// 4. Known Approved Grok Client
+// 4. Known Static Grok Client
 // ---------------------------------------------------------------------------
 test("OAuth: successfully verifies known approved Grok client with exact callback URI", () => {
   const res = validateOAuthClient(
@@ -181,21 +218,61 @@ test("OAuth: successfully verifies known approved Grok client with exact callbac
   assert.equal(res.connector, "grok");
   assert.equal(res.clientId, ACTIVE_GROK_CLIENT_ID);
   assert.equal(res.isKnownStatic, true);
+  assert.equal(res.isDynamicRegistration, false);
+  assert.equal(res.requiresInteractiveConsent, true);
   assert.equal(res.redirectUri, VERIFIED_GROK_CALLBACK_URI);
 });
 
 // ---------------------------------------------------------------------------
-// 5. Dynamic Client Registration Awaiting Explicit Approval
+// 5. Dynamic Grok Client Registration & Consent Lifecycle
 // ---------------------------------------------------------------------------
-test("OAuth: keeps dynamically registered clients untrusted until explicit owner approval", () => {
+test("OAuth: accepts dynamic Grok registration on consent page but requires active owner consent", () => {
+  const dynamicGrokId = "b54de595-6bce-4298-836c-2b46a2595904";
   const dynamicRegistration = {
-    id: "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
-    name: "Grok Dynamic Registration",
+    id: dynamicGrokId,
+    name: "Grok",
   };
-  const res = validateOAuthClient(dynamicRegistration, VERIFIED_GROK_CALLBACK_URI);
-  assert.equal(res.trusted, false);
-  assert.equal(res.isPendingApproval, true);
-  assert.match(res.reason, /Unknown or dynamically registered clients require explicit owner approval/);
+
+  // Step 1: Consent page validation recognizes dynamic Grok client
+  const consentRes = validateOAuthClient(dynamicRegistration, VERIFIED_GROK_CALLBACK_URI);
+  assert.equal(consentRes.trusted, true);
+  assert.equal(consentRes.isDynamicRegistration, true);
+  assert.equal(consentRes.requiresInteractiveConsent, true);
+  assert.equal(consentRes.clientId, dynamicGrokId);
+
+  // Step 2: Before owner gives consent, server-side validator and MCP reject access
+  const tokenClaims = {
+    sub: DESIGNATED_OWNER_UUID,
+    role: "authenticated",
+    client_id: dynamicGrokId,
+  };
+  const beforeConsent = evaluateMcpAuth(tokenClaims, "runtime_status");
+  assert.equal(beforeConsent.allowed, false);
+  assert.equal(beforeConsent.status, 403);
+  assert.match(beforeConsent.error, /Unauthorized OAuth client/);
+
+  // Step 3: Owner grants consent interactively on /oauth/consent
+  MOCK_ACTIVE_CONSENTS.set(`${DESIGNATED_OWNER_UUID}:${dynamicGrokId}`, {
+    scopes: "openid profile email",
+    granted_at: new Date(),
+    revoked_at: null,
+  });
+
+  // Step 4: After consent is granted, MCP access is permitted
+  const afterConsent = evaluateMcpAuth(tokenClaims, "runtime_status");
+  assert.equal(afterConsent.allowed, true);
+
+  // Step 5: If owner revokes consent, access is immediately blocked
+  MOCK_ACTIVE_CONSENTS.set(`${DESIGNATED_OWNER_UUID}:${dynamicGrokId}`, {
+    scopes: "openid profile email",
+    granted_at: new Date(),
+    revoked_at: new Date(), // Revoked!
+  });
+
+  const afterRevoke = evaluateMcpAuth(tokenClaims, "runtime_status");
+  assert.equal(afterRevoke.allowed, false);
+  assert.equal(afterRevoke.status, 403);
+  assert.match(afterRevoke.error, /Unauthorized OAuth client/);
 });
 
 // ---------------------------------------------------------------------------
@@ -221,7 +298,7 @@ test("OAuth: blocks automatic redirect when response lacks verified client detai
   assert.equal(evaluatedFresh.trusted, true);
   assert.equal(evaluatedFresh.clientId, ACTIVE_GROK_CLIENT_ID);
 
-  // Case C: Explicit details but unapproved client attempting to claim Grok callback
+  // Case C: Explicit details but mismatched client metadata
   const unapprovedDetails = {
     authorization_id: "sq5waqj6n3wanxvh2zsp3jqmygqnyyr5",
     client: { id: "3a6b0c2a-51fb-43c8-8625-3056092fad8e", name: "Cursor" },
@@ -229,7 +306,7 @@ test("OAuth: blocks automatic redirect when response lacks verified client detai
   };
   const evaluatedUnapproved = evaluateConsentResponse(unapprovedDetails);
   assert.equal(evaluatedUnapproved.trusted, false);
-  assert.equal(evaluatedUnapproved.isPendingApproval, true);
+  assert.match(evaluatedUnapproved.reason, /Mismatched client metadata/);
 });
 
 // ---------------------------------------------------------------------------
@@ -423,3 +500,39 @@ test("OAuth Flow: validateAuthorizationId strictly validates format", () => {
   assert.equal(validateAuthorizationId(null).valid, false);
   assert.equal(validateAuthorizationId("").valid, false);
 });
+
+// ---------------------------------------------------------------------------
+// 13. Edge Function Single-Source Audit
+// ---------------------------------------------------------------------------
+test("OAuth Edge Function: delegates client trust to database validator without hardcoded client IDs", () => {
+  const edgeFunctionSource = fs.readFileSync(
+    "supabase/functions/jf-grok-owner-mcp/index.ts",
+    "utf-8"
+  );
+
+  // Verifies database validator delegation
+  assert.match(edgeFunctionSource, /ctx\.supabase\.rpc\(\s*['"]jf_validate_grok_oauth_client['"]/);
+  // Verifies no static hardcoded set of client IDs
+  assert.doesNotMatch(edgeFunctionSource, /const\s+TRUSTED_CLIENT_IDS\s*=/);
+  // Verifies only runtime_status is registered
+  assert.match(edgeFunctionSource, /server\.registerTool\(\s*['"]runtime_status['"]/);
+});
+
+// ---------------------------------------------------------------------------
+// 14. SQL Migration Audit
+// ---------------------------------------------------------------------------
+test("OAuth Migration: defines server-side validator checking registered client, callback, and unrevoked consent", () => {
+  const migrationSql = fs.readFileSync(
+    "supabase/migrations/20261109230000_permanent_grok_dynamic_oauth.sql",
+    "utf-8"
+  );
+
+  assert.match(migrationSql, /CREATE OR REPLACE FUNCTION jobbot\.validate_grok_oauth_client/);
+  assert.match(migrationSql, /CREATE OR REPLACE FUNCTION public\.jf_validate_grok_oauth_client/);
+  assert.match(migrationSql, /auth\.oauth_clients/);
+  assert.match(migrationSql, /https:\/\/grok\.com\/connectors-oauth-exchange-code\//);
+  assert.match(migrationSql, /auth\.oauth_consents/);
+  assert.match(migrationSql, /revoked_at IS NULL/);
+  assert.match(migrationSql, /jobbot\.validate_grok_oauth_client\(v_client_id::uuid, v_uid\)/);
+});
+

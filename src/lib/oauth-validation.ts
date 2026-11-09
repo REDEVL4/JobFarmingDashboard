@@ -9,11 +9,10 @@ export const TRUSTED_REDIRECT_URIS = [
   VERIFIED_GROK_CALLBACK_URI,
 ];
 
-// Single active approved Grok OAuth client ID
+// Reference Grok OAuth client ID (historical registration)
 export const ACTIVE_GROK_CLIENT_ID = "16bdb57f-c2cd-40d8-b6e1-c1a1b17e3f32";
 
-// Specifically authorized OAuth client IDs in Supabase Auth
-// Historical registrations and Cursor access are removed to enforce least privilege.
+// Specifically authorized static OAuth client IDs in Supabase Auth (for backwards compatibility)
 export const TRUSTED_STATIC_CLIENT_IDS = new Set([
   ACTIVE_GROK_CLIENT_ID,
 ]);
@@ -134,9 +133,11 @@ export type ClientTrustResult =
       trusted: true;
       connector: "grok";
       isKnownStatic: boolean;
+      isDynamicRegistration: boolean;
       clientName: string;
       clientId: string;
       redirectUri: string;
+      requiresInteractiveConsent: boolean;
     }
   | {
       trusted: false;
@@ -149,12 +150,14 @@ export type ClientTrustResult =
     };
 
 /**
- * Strict OAuth Client verification:
- * Requires BOTH:
- * 1. Exact approved Grok callback URI (https://grok.com/connectors-oauth-exchange-code/)
- * 2. Explicitly authorized client ID (ACTIVE_GROK_CLIENT_ID)
+ * Permanent Grok OAuth Client verification:
+ * Supports dynamically registered Grok clients while preventing arbitrary client registrations.
  *
- * Dynamically registered or unknown clients remain untrusted until explicitly approved by the owner.
+ * Requirements:
+ * 1. Valid UUID client identifier.
+ * 2. Exact approved Grok callback URI (https://grok.com/connectors-oauth-exchange-code/).
+ * 3. Verified client metadata matching Grok connector name.
+ * 4. Requires explicit interactive owner consent before authorization code is issued.
  */
 export function validateOAuthClient(
   client: { id: string; name?: string } | null | undefined,
@@ -179,7 +182,7 @@ export function validateOAuthClient(
 
   const trimmedRedirect = redirectUri.trim();
 
-  // 1. Strict callback URI verification
+  // 1. Strict callback URI verification: must match approved Grok connector callback exactly
   if (trimmedRedirect !== VERIFIED_GROK_CALLBACK_URI) {
     return {
       trusted: false,
@@ -190,26 +193,29 @@ export function validateOAuthClient(
     };
   }
 
-  // 2. Strict client ID verification against explicitly approved allowlist
-  const isApproved = TRUSTED_OAUTH_CLIENT_IDS.has(client.id);
-  if (!isApproved) {
+  // 2. Client metadata verification: must match Grok connector name
+  const clientName = client.name?.trim() || "";
+  if (!/^Grok/i.test(clientName)) {
     return {
       trusted: false,
-      reason: `OAuth client '${client.id}' is not in the active authorized allowlist. Unknown or dynamically registered clients require explicit owner approval.`,
-      connector: "grok",
+      reason: `Mismatched client metadata. Expected Grok connector client name, but received '${clientName || "unnamed"}'.`,
+      connector: "untrusted",
       clientId: client.id,
       redirectUri: trimmedRedirect,
-      isPendingApproval: true,
     };
   }
+
+  const isKnownStatic = client.id === ACTIVE_GROK_CLIENT_ID;
 
   return {
     trusted: true,
     connector: "grok",
-    isKnownStatic: true,
+    isKnownStatic,
+    isDynamicRegistration: !isKnownStatic,
     clientName: client.name || "Grok",
     clientId: client.id,
     redirectUri: trimmedRedirect,
+    requiresInteractiveConsent: true,
   };
 }
 

@@ -10,11 +10,6 @@ import { recordToolList } from './discovery.mjs';
 const DIAGNOSTIC_UNTIL = Date.parse('2026-11-08T22:57:09.877Z');
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const ACTIVE_GROK_CLIENT_ID = '16bdb57f-c2cd-40d8-b6e1-c1a1b17e3f32';
-const TRUSTED_CLIENT_IDS = new Set([
-  // Primary active Grok connector (historical registrations & Cursor removed for least privilege)
-  ACTIVE_GROK_CLIENT_ID,
-]);
 
 const handler = pipeline(
   [withOAuthProtectedResource(), withSupabase({ auth: 'user' })],
@@ -32,8 +27,12 @@ const handler = pipeline(
     if (!clientId || typeof clientId !== 'string' || !UUID_REGEX.test(clientId)) {
       return Response.json({ error: 'Present and valid OAuth client_id required' }, { status: 403 });
     }
-    // 4. Explicitly approved client ID check (reject unknown / dynamic clients)
-    if (!TRUSTED_CLIENT_IDS.has(clientId)) {
+    // 4. Database-enforced client validation: single source of truth
+    // Verifies registered client, approved Grok callback URI, owner authentication, and active owner consent
+    const { data: isClientAuthorized, error: valError } = await ctx.supabase.rpc('jf_validate_grok_oauth_client', {
+      p_client_id: clientId,
+    });
+    if (valError || !isClientAuthorized) {
       return Response.json({ error: 'Unauthorized OAuth client' }, { status: 403 });
     }
     const message = req.method === 'POST' ? await req.clone().json().catch(() => null) : null;

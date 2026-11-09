@@ -1,10 +1,26 @@
 # Supabase Project Configuration
 project_id = "mldtysploensrrulchdl"
 
+[auth]
+site_url = "https://job-farming-dashboard.vercel.app"
+additional_redirect_urls = [
+  "https://job-farming-dashboard-djrororock-9846s-projects.vercel.app/",
+  "https://job-farming-dashboard-djrororock-9846s-projects.vercel.app/**",
+  "https://job-*-farming-dashboard-djrororock-9846s-projects.vercel.app",
+  "https://job-*-farming-dashboard-djrororock-9846s-projects.vercel.app/**",
+  "https://job-farming-dashboard.vercel.app/**"
+]
+
+[auth.oauth_server]
+enabled = true
+authorization_url_path = "/oauth/consent"
+allow_dynamic_registration = true
+
 # Scoped configuration for Edge Functions:
-# JWT gateway verification disabled for gmail-status-sync;
-# application-level shared secret (x-jf-monitor-token) is enforced.
+# JWT gateway verification disabled for gmail-status-sync and jf-grok-owner-mcp;
+# application-level authentication is enforced.
 [functions.gmail-status-sync]
 verify_jwt = false
 
-
+[functions.jf-grok-owner-mcp]
+verify_jwt = false
