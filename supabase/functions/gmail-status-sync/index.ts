@@ -6,11 +6,25 @@ import {
   resolveScanWindow,
   computeContinuationState,
 } from "./continuation.ts";
+import {
+  executeGmailSync,
+  HistoryExpiredError,
+} from "./history-sync.ts";
+import {
+  checkSensitiveMessage,
+  sanitizeSubject,
+  sanitizeSender,
+  computeContentHash,
+} from "./sensitive-filter.ts";
+import {
+  enqueueDiscoveredMessages,
+} from "./queue-service.ts";
 import type {
   CandidateApplication,
   CanonicalHiringStage,
   ReviewReasonCode,
   SyncRunResult,
+  GmailQueueItem,
 } from "./types.ts";
 
 const OWNER_EMAIL = "govardhanreddy.vys7@gmail.com";
@@ -290,31 +304,22 @@ Deno.serve(async (req) => {
       bodyAfterEpoch: body.continuation_after_epoch ? Number(body.continuation_after_epoch) : null,
     });
 
-    let gmailQuery = `after:${scanWindow.queryAfterEpoch}`;
-    if (scanWindow.queryBeforeEpoch) {
-      gmailQuery += ` before:${scanWindow.queryBeforeEpoch}`;
-    }
-    gmailQuery += ` (label:INBOX OR label:SENT) -from:security-noreply@*`;
+    // 7. Loss-Resistant Gmail Synchronization (History API + Full Query Fallback)
+    // Removes restrictive (label:INBOX OR label:SENT) to capture archived and custom-labeled emails
+    const syncResult = await executeGmailSync({
+      token,
+      startHistoryId: scanWindow.startHistoryId || body.start_history_id || null,
+      queryAfterEpoch: scanWindow.queryAfterEpoch,
+      queryBeforeEpoch: scanWindow.queryBeforeEpoch,
+      maxMessages,
+      pageToken: body.continuation_page_token || undefined,
+      gapReconciliation: gapReconcile,
+    });
 
-    // 7. Discover Gmail messages with pagination tracking
-    const rawMessageHeaders: Array<{ id: string; threadId: string }> = [];
-    let pageToken = body.continuation_page_token || "";
-    let reachedLimit = false;
-
-    do {
-      const page = await callGmailApi(
-        token,
-        `messages?q=${encodeURIComponent(gmailQuery)}&maxResults=100${pageToken ? `&pageToken=${pageToken}` : ""}`
-      );
-      for (const m of page.messages || []) {
-        rawMessageHeaders.push(m);
-      }
-      pageToken = page.nextPageToken || "";
-      if (rawMessageHeaders.length >= maxMessages) {
-        reachedLimit = true;
-        break;
-      }
-    } while (pageToken);
+    const rawMessageHeaders = syncResult.messages;
+    const pageToken = syncResult.nextPageToken || "";
+    const hasMoreBacklog = syncResult.hasMoreBacklog;
+    const latestHistoryId = syncResult.latestHistoryId;
 
     // 8. Load known applications and deduplication sets
     const [appsRows, reviewRows, eventRows] = await Promise.all([
@@ -390,6 +395,9 @@ Deno.serve(async (req) => {
     }> = [];
 
     const ignoredMessageIds: string[] = [];
+    const queueItems: GmailQueueItem[] = [];
+    const excludedSensitiveItems: Array<{ messageId: string; reason: string }> = [];
+
     let maxInternalDate = 0;
     let minInternalDate = Infinity;
 
@@ -406,9 +414,65 @@ Deno.serve(async (req) => {
       }
 
       const headers = msg.payload?.headers || [];
-      const subject = getHeader(headers, "Subject");
-      const from = getHeader(headers, "From");
+      const subject = getHeader(headers, "Subject") || "";
+      const from = getHeader(headers, "From") || "";
       const snippet = msg.snippet || "";
+
+      // Sensitive check & content hashing
+      const sensitiveCheck = checkSensitiveMessage({ from, subject, snippet });
+      const isSensitive = sensitiveCheck.isSensitive;
+
+      const contentHash = await computeContentHash({
+        mailbox: OWNER_EMAIL,
+        messageId: msgId,
+        internalDate,
+        subject,
+        snippet,
+        isSensitive,
+      });
+
+      if (isSensitive) {
+        excludedSensitiveItems.push({
+          messageId: msgId,
+          reason: sensitiveCheck.reason || "sensitive_security_otp",
+        });
+        queueItems.push({
+          owner_id: OWNER_UUID,
+          mailbox: OWNER_EMAIL,
+          message_id: msgId,
+          thread_id: msg.threadId || msgId,
+          message_timestamp: internalDate > 0 ? new Date(internalDate).toISOString() : new Date().toISOString(),
+          history_id: msg.historyId ? String(msg.historyId) : (latestHistoryId || null),
+          processing_status: "excluded",
+          content_hash: contentHash,
+          subject_clean: "[REDACTED]",
+          sender_clean: sanitizeSender(from),
+          attempt_count: 0,
+          max_attempts: 5,
+          review_status: "ignored",
+          exclusion_reason: sensitiveCheck.reason,
+        });
+        // Never process sensitive security emails for recruitment updates
+        continue;
+      }
+
+      // Non-sensitive: Always queue for future Grok analysis
+      queueItems.push({
+        owner_id: OWNER_UUID,
+        mailbox: OWNER_EMAIL,
+        message_id: msgId,
+        thread_id: msg.threadId || msgId,
+        message_timestamp: internalDate > 0 ? new Date(internalDate).toISOString() : new Date().toISOString(),
+        history_id: msg.historyId ? String(msg.historyId) : (latestHistoryId || null),
+        processing_status: "pending",
+        content_hash: contentHash,
+        subject_clean: sanitizeSubject(subject),
+        sender_clean: sanitizeSender(from),
+        attempt_count: 0,
+        max_attempts: 5,
+        review_status: "pending",
+      });
+
       const bodyText = extractBodyText(msg.payload);
 
       const classification = classifyRecruitmentEmail({
@@ -522,6 +586,10 @@ Deno.serve(async (req) => {
         status: continuation.status,
         dry_run: true,
         mailbox: OWNER_EMAIL,
+        sync_strategy: syncResult.strategy,
+        start_history_id: scanWindow.startHistoryId || null,
+        latest_history_id: latestHistoryId || null,
+        history_expired_recovered: syncResult.historyExpiredRecovered || false,
         run_kind: scanWindow.isResumingBackfill
           ? "backfill_continuation_dry_run"
           : (gapReconcile ? "gap_reconciliation_dry_run" : "scheduled_incremental_poll_dry_run"),
@@ -535,6 +603,9 @@ Deno.serve(async (req) => {
         continuation_ceiling_time: continuation.nextContinuationCeilingTime,
         continuation_page_token: continuation.hasMoreBacklog ? (pageToken || null) : null,
         messages_discovered: rawMessageHeaders.length,
+        messages_enqueued: queueItems.filter((q) => q.processing_status === "pending").length,
+        messages_excluded_sensitive: excludedSensitiveItems.length,
+        excluded_sensitive_details: excludedSensitiveItems,
         proposed_changes_count: proposedChanges.length,
         proposed_reviews_count: proposedReviews.length,
         duplicate_messages_count: duplicateCount,
@@ -566,9 +637,15 @@ Deno.serve(async (req) => {
         mailbox: OWNER_EMAIL,
         dryRun: true,
         gapReconciled: gapReconcile,
+        syncStrategy: syncResult.strategy,
+        startHistoryId: scanWindow.startHistoryId || null,
+        latestHistoryId: latestHistoryId || null,
         scanStartAt: new Date(scanWindow.queryAfterEpoch * 1000).toISOString(),
         scanEndAt: completedAt,
         messagesFound: rawMessageHeaders.length,
+        messagesEnqueued: queueItems.filter((q) => q.processing_status === "pending").length,
+        messagesExcludedSensitive: excludedSensitiveItems.length,
+        excludedSensitiveDetails: excludedSensitiveItems,
         messagesClassified: proposedChanges.length + proposedReviews.length,
         statusChangesConfirmed: 0, // Actual committed updates is zero
         reviewItemsQueued: 0,     // Actual committed reviews is zero
@@ -607,6 +684,15 @@ Deno.serve(async (req) => {
     let actualCommittedReviews = 0;
 
     await sql.begin(async (tx) => {
+      // Invariant: Enqueue discovered messages into durable processing queue
+      if (queueItems.length > 0) {
+        try {
+          await enqueueDiscoveredMessages(tx, queueItems);
+        } catch (err: any) {
+          console.warn("Queue enqueueing skipped (table may be pending migration):", err?.message || err);
+        }
+      }
+
       // Invariant: Update application hiring stage ONLY IF corresponding Gmail event was actually inserted.
       // If event already exists (duplicate), DO NOT update application.
       for (const change of proposedChanges) {
@@ -699,6 +785,10 @@ Deno.serve(async (req) => {
         status: continuation.status,
         dry_run: false,
         mailbox: OWNER_EMAIL,
+        sync_strategy: syncResult.strategy,
+        start_history_id: scanWindow.startHistoryId || null,
+        latest_history_id: latestHistoryId || null,
+        history_expired_recovered: syncResult.historyExpiredRecovered || false,
         run_kind: scanWindow.isResumingBackfill
           ? "backfill_continuation"
           : (gapReconcile ? "gap_reconciliation" : "scheduled_incremental_poll"),
@@ -712,6 +802,9 @@ Deno.serve(async (req) => {
         continuation_ceiling_time: continuation.nextContinuationCeilingTime,
         continuation_page_token: continuation.hasMoreBacklog ? (pageToken || null) : null,
         messages_discovered: rawMessageHeaders.length,
+        messages_enqueued: queueItems.filter((q) => q.processing_status === "pending").length,
+        messages_excluded_sensitive: excludedSensitiveItems.length,
+        excluded_sensitive_details: excludedSensitiveItems,
         updated_count: actualCommittedUpdates,
         duplicate_deliveries_skipped: duplicateDeliveriesSkipped,
         review_queued_count: actualCommittedReviews,
@@ -736,6 +829,12 @@ Deno.serve(async (req) => {
       runId,
       status: continuation.hasMoreBacklog ? "partial_backfill_succeeded" : "sync_succeeded",
       dryRun: false,
+      syncStrategy: syncResult.strategy,
+      startHistoryId: scanWindow.startHistoryId || null,
+      latestHistoryId: latestHistoryId || null,
+      messagesEnqueued: queueItems.filter((q) => q.processing_status === "pending").length,
+      messagesExcludedSensitive: excludedSensitiveItems.length,
+      excludedSensitiveDetails: excludedSensitiveItems,
       updated: actualCommittedUpdates,
       duplicateDeliveriesSkipped,
       reviewsQueued: actualCommittedReviews,

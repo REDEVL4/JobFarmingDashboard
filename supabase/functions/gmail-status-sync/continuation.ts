@@ -13,6 +13,7 @@ export interface ScanWindow {
   queryBeforeEpoch: number | null;
   isResumingBackfill: boolean;
   continuationCeilingTime: string | null;
+  startHistoryId?: string | null;
 }
 
 export interface ContinuationState {
@@ -41,6 +42,7 @@ export function resolveScanWindow(params: {
   overlapMinutes: number;
   bodyBeforeEpoch?: number | null;
   bodyAfterEpoch?: number | null;
+  bodyStartHistoryId?: string | null;
 }): ScanWindow {
   const {
     latestProductionLog,
@@ -49,6 +51,7 @@ export function resolveScanWindow(params: {
     overlapMinutes,
     bodyBeforeEpoch,
     bodyAfterEpoch,
+    bodyStartHistoryId,
   } = params;
 
   // 1. Explicit request parameters override if provided
@@ -58,6 +61,7 @@ export function resolveScanWindow(params: {
       queryBeforeEpoch: bodyBeforeEpoch || null,
       isResumingBackfill: Boolean(bodyBeforeEpoch),
       continuationCeilingTime: null,
+      startHistoryId: bodyStartHistoryId || null,
     };
   }
 
@@ -69,6 +73,7 @@ export function resolveScanWindow(params: {
       queryBeforeEpoch: null,
       isResumingBackfill: false,
       continuationCeilingTime: null,
+      startHistoryId: null, // Force full scan for reconciliation
     };
   }
 
@@ -86,6 +91,8 @@ export function resolveScanWindow(params: {
     vResults.has_more_backlog === true ||
     vResults.checkpoint_advanced === false;
 
+  const latestHistoryId = bodyStartHistoryId || vResults.latest_history_id || vResults.history_id || null;
+
   if (isBacklogUnfinished && vResults.continuation_before_epoch && vResults.continuation_after_epoch) {
     // Durable backfill continuation: scan older remaining window
     return {
@@ -93,6 +100,7 @@ export function resolveScanWindow(params: {
       queryBeforeEpoch: Number(vResults.continuation_before_epoch),
       isResumingBackfill: true,
       continuationCeilingTime: vResults.continuation_ceiling_time || latestProductionLog?.completed_at || null,
+      startHistoryId: latestHistoryId,
     };
   }
 
@@ -114,6 +122,7 @@ export function resolveScanWindow(params: {
     queryBeforeEpoch: null,
     isResumingBackfill: false,
     continuationCeilingTime: null,
+    startHistoryId: latestHistoryId,
   };
 }
 
