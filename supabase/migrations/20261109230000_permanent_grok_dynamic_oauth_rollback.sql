@@ -1,9 +1,10 @@
 -- Rollback Migration: 20261109230000_permanent_grok_dynamic_oauth_rollback.sql
--- Restores jf_owner_runtime_status to baseline 20261109193000 definition
+-- Restores baseline definitions
 
 DROP FUNCTION IF EXISTS public.jf_validate_grok_oauth_client(uuid);
 DROP FUNCTION IF EXISTS jobbot.validate_grok_oauth_client(uuid, uuid);
 
+-- Restore jf_owner_runtime_status from 20261109193000
 CREATE OR REPLACE FUNCTION public.jf_owner_runtime_status()
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -43,3 +44,29 @@ $function$;
 
 REVOKE ALL ON FUNCTION public.jf_owner_runtime_status() FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.jf_owner_runtime_status() TO authenticated, service_role;
+
+-- Restore jobbot.require_grok_intelligence_auth from 20261109210000
+CREATE OR REPLACE FUNCTION jobbot.require_grok_intelligence_auth()
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+DECLARE
+  v_uid uuid := (SELECT auth.uid());
+  v_client_id text := auth.jwt()->>'client_id';
+BEGIN
+  IF v_uid IS DISTINCT FROM 'f2729195-5445-4272-ab85-cac5b03b0967'::uuid THEN
+    RAISE EXCEPTION 'Owner authentication required';
+  END IF;
+  IF v_client_id IS NOT NULL AND v_client_id != '16bdb57f-c2cd-40d8-b6e1-c1a1b17e3f32' THEN
+    RAISE EXCEPTION 'Unauthorized OAuth client: %', v_client_id;
+  END IF;
+  IF v_client_id IS NULL THEN
+    PERFORM jobbot.require_owner_processing_auth();
+  END IF;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION jobbot.require_grok_intelligence_auth() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION jobbot.require_grok_intelligence_auth() TO authenticated, service_role;

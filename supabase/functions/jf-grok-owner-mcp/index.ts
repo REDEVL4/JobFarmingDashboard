@@ -6,10 +6,29 @@ import { z } from 'npm:zod@4.3.6';
 
 import { recordTransportError } from './transport-diagnostic.mjs';
 import { recordToolList } from './discovery.mjs';
+import { fetchAndSanitizeQueuedEmail } from './gmail-fetcher.ts';
 
 const DIAGNOSTIC_UNTIL = Date.parse('2026-11-08T22:57:09.877Z');
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const ALLOWED_TOOLS = new Set([
+  'runtime_status',
+  'list_pending_recruitment_emails',
+  'get_recruitment_email_details',
+  'find_candidate_applications',
+  'submit_classification_proposal',
+]);
+
+const VALID_CLASSIFICATIONS = [
+  'application_confirmation',
+  'rejection',
+  'interview_invitation',
+  'assessment',
+  'recruiter_follow_up',
+  'offer',
+  'other_uncertain',
+] as const;
 
 const handler = pipeline(
   [withOAuthProtectedResource(), withSupabase({ auth: 'user' })],
@@ -35,24 +54,28 @@ const handler = pipeline(
     if (valError || !isClientAuthorized) {
       return Response.json({ error: 'Unauthorized OAuth client' }, { status: 403 });
     }
+
     const message = req.method === 'POST' ? await req.clone().json().catch(() => null) : null;
-    // Strictly restrict OAuth callers to read-only runtime_status tool execution
+
+    // Strictly restrict OAuth callers to approved recruitment intelligence tools
     if (message?.method === 'tools/call') {
       const toolName = message.params?.name;
-      if (toolName !== 'runtime_status') {
+      if (!ALLOWED_TOOLS.has(toolName)) {
         return Response.json({
           jsonrpc: '2.0',
           id: message.id,
           error: {
             code: -32601,
-            message: `Tool '${toolName}' is disabled for OAuth clients. Only read-only 'runtime_status' is permitted.`,
+            message: `Tool '${toolName}' is disabled for OAuth clients. Only approved recruitment intelligence tools are permitted.`,
           },
         }, { status: 403 });
       }
     }
+
     const mcp = createMcpHandler(() => {
-      const server = new McpServer({ name: 'jf-grok-owner-mcp', version: '0.2.0' });
-      // Only register read-only runtime_status; do not advertise mutation tools in tools/list
+      const server = new McpServer({ name: 'jf-grok-owner-mcp', version: '0.3.0' });
+
+      // Tool 1: Runtime Status (read-only)
       server.registerTool(
         'runtime_status',
         {
@@ -63,12 +86,132 @@ const handler = pipeline(
         },
         async () => {
           const { data, error } = await ctx.supabase.rpc('jf_owner_runtime_status');
-          if (error) throw new Error('Owner-authenticated status unavailable');
+          if (error) throw new Error(`Owner-authenticated status unavailable: ${error.message}`);
           return { content: [{ type: 'text', text: JSON.stringify(data) }] };
         },
       );
+
+      // Tool 2: List pending recruitment emails (bounded pagination)
+      server.registerTool(
+        'list_pending_recruitment_emails',
+        {
+          title: 'List pending recruitment emails',
+          description: 'Retrieves a bounded page of pending emails from the queue for classification analysis.',
+          inputSchema: z.object({
+            limit: z.number().int().min(1).max(25).optional().default(10),
+            after_id: z.string().uuid().optional(),
+          }),
+          annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+        },
+        async ({ limit, after_id }) => {
+          const { data, error } = await ctx.supabase.rpc('jf_grok_list_pending_emails', {
+            p_limit: limit ?? 10,
+            p_after_id: after_id ?? null,
+          });
+          if (error) throw new Error(`Failed to list pending emails: ${error.message}`);
+          return { content: [{ type: 'text', text: JSON.stringify(data) }] };
+        },
+      );
+
+      // Tool 3: Get sanitized recruitment email details with on-demand Gmail fetch
+      server.registerTool(
+        'get_recruitment_email_details',
+        {
+          title: 'Get recruitment email details',
+          description: 'Validates queue ownership and fetches sanitized message content on-demand from Gmail using server-side credentials.',
+          inputSchema: z.object({
+            queue_id: z.string().uuid(),
+          }),
+          annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+        },
+        async ({ queue_id }) => {
+          // 1. Validate queue record existence and ownership via RPC
+          const { data: queueRec, error: queueError } = await ctx.supabase.rpc('jf_grok_get_email_details', {
+            p_queue_id: queue_id,
+          });
+          if (queueError || !queueRec) {
+            throw new Error(`Queue record not found or inaccessible: ${queueError?.message || 'Not found'}`);
+          }
+
+          // 2. Fetch and sanitize message on-demand using server-side OAuth credentials
+          try {
+            const sanitized = await fetchAndSanitizeQueuedEmail(ctx.supabase, queueRec);
+            return { content: [{ type: 'text', text: JSON.stringify(sanitized) }] };
+          } catch (fetchErr: any) {
+            // Fallback gracefully to queue record metadata if external Gmail API fails temporarily
+            return {
+              content: [{
+                type: 'text',
+                text: JSON.stringify({
+                  ...queueRec,
+                  fetch_status: 'fetch_failed',
+                  fetch_error: fetchErr?.message || String(fetchErr),
+                }),
+              }],
+            };
+          }
+        },
+      );
+
+      // Tool 4: Find candidate applications matching company/title
+      server.registerTool(
+        'find_candidate_applications',
+        {
+          title: 'Find candidate applications',
+          description: 'Searches existing job applications to match against an email sender or company name.',
+          inputSchema: z.object({
+            query: z.string().min(1).max(100),
+            limit: z.number().int().min(1).max(10).optional().default(5),
+          }),
+          annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+        },
+        async ({ query, limit }) => {
+          const { data, error } = await ctx.supabase.rpc('jf_grok_find_candidate_applications', {
+            p_query: query,
+            p_limit: limit ?? 5,
+          });
+          if (error) throw new Error(`Failed to find candidate applications: ${error.message}`);
+          return { content: [{ type: 'text', text: JSON.stringify(data) }] };
+        },
+      );
+
+      // Tool 5: Submit classification proposal (writes only to review queue, never to applications)
+      server.registerTool(
+        'submit_classification_proposal',
+        {
+          title: 'Submit classification proposal',
+          description: 'Submits a structured email classification proposal to the owner review queue. Never mutates application status.',
+          inputSchema: z.object({
+            queue_id: z.string().uuid(),
+            classification: z.enum(VALID_CLASSIFICATIONS),
+            confidence: z.number().min(0).max(1),
+            application_id: z.string().uuid().optional(),
+            proposed_stage: z.string().max(50).optional(),
+            evidence_summary: z.string().max(1000),
+            ambiguity_notes: z.string().max(1000).optional(),
+            idempotency_key: z.string().uuid().optional(),
+          }),
+          annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+        },
+        async (params) => {
+          const { data, error } = await ctx.supabase.rpc('jf_grok_submit_classification_proposal', {
+            p_queue_id: params.queue_id,
+            p_classification: params.classification,
+            p_confidence: params.confidence,
+            p_application_id: params.application_id ?? null,
+            p_proposed_stage: params.proposed_stage ?? null,
+            p_evidence_summary: params.evidence_summary,
+            p_ambiguity_notes: params.ambiguity_notes ?? null,
+            p_idempotency_key: params.idempotency_key ?? null,
+          });
+          if (error) throw new Error(`Failed to submit proposal: ${error.message}`);
+          return { content: [{ type: 'text', text: JSON.stringify(data) }] };
+        },
+      );
+
       return server;
     });
+
     const response = await mcp.fetch(req);
     if (Date.now() < DIAGNOSTIC_UNTIL && req.method === 'POST' && response.status === 400) {
       try {

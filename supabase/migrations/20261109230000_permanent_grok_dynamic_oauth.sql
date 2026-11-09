@@ -1,9 +1,15 @@
 -- Migration: 20261109230000_permanent_grok_dynamic_oauth.sql
--- Description: Establishes single-source-of-truth server-side authorization validator
--- for Grok OAuth clients. Supports dynamically registered Grok clients while requiring
--- exact callback URI, expected client metadata, owner authentication, and active owner consent.
+-- Description: Unified Grok OAuth authorization and recruitment intelligence security.
+-- 1. Remediates Gmail credential accessor (revokes from authenticated, grants only to service_role).
+-- 2. Establishes single-source database validator for dynamically registered Grok clients.
+-- 3. Updates jf_owner_runtime_status and require_grok_intelligence_auth to use unified validator.
+-- 4. Preserves all RLS policies and workflow mutation RPC blocks.
 
--- 1. Single source of truth validator in jobbot schema
+-- 1. Remediate Critical Issue A: Lock down server-side Gmail credential accessor
+REVOKE ALL ON FUNCTION jobbot.get_gmail_fetch_credentials() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION jobbot.get_gmail_fetch_credentials() TO service_role;
+
+-- 2. Single source of truth validator in jobbot schema
 CREATE OR REPLACE FUNCTION jobbot.validate_grok_oauth_client(
   p_client_id uuid,
   p_user_id uuid
@@ -38,13 +44,12 @@ BEGIN
   END IF;
 
   -- 4. Client redirect URIs must contain the verified Grok callback URI
-  -- Redirect URIs in auth.oauth_clients can be comma-separated or a single string
   IF v_client.redirect_uris IS NULL OR
      NOT ('https://grok.com/connectors-oauth-exchange-code/' = ANY(string_to_array(v_client.redirect_uris, ','))) THEN
     RETURN false;
   END IF;
 
-  -- 5. Client name must match Grok
+  -- 5. Client name must match Grok (required expected metadata)
   IF coalesce(v_client.client_name, '') !~* '^Grok' THEN
     RETURN false;
   END IF;
@@ -67,7 +72,7 @@ $$;
 REVOKE ALL ON FUNCTION jobbot.validate_grok_oauth_client(uuid, uuid) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION jobbot.validate_grok_oauth_client(uuid, uuid) TO authenticated, service_role;
 
--- 2. Public RPC wrapper for Edge Function / server-side verification
+-- 3. Public RPC wrapper for Edge Function / server-side verification
 CREATE OR REPLACE FUNCTION public.jf_validate_grok_oauth_client(
   p_client_id uuid
 )
@@ -89,7 +94,7 @@ $$;
 REVOKE ALL ON FUNCTION public.jf_validate_grok_oauth_client(uuid) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.jf_validate_grok_oauth_client(uuid) TO authenticated, service_role;
 
--- 3. Update public.jf_owner_runtime_status to use single source of truth validator
+-- 4. Update public.jf_owner_runtime_status to use single source of truth validator
 CREATE OR REPLACE FUNCTION public.jf_owner_runtime_status()
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -106,12 +111,10 @@ BEGIN
 
   -- If client_id is present (OAuth token), validate via single-source database validator
   IF v_client_id IS NOT NULL THEN
-    -- Validate UUID format
     IF v_client_id !~* '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$' THEN
       RAISE EXCEPTION 'Invalid OAuth client_id format';
     END IF;
 
-    -- Server-side validation: registered Grok client, approved callback, active owner consent
     IF NOT jobbot.validate_grok_oauth_client(v_client_id::uuid, v_uid) THEN
       RAISE EXCEPTION 'Unauthorized OAuth client: %', v_client_id;
     END IF;
@@ -144,3 +147,41 @@ $function$;
 
 REVOKE ALL ON FUNCTION public.jf_owner_runtime_status() FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.jf_owner_runtime_status() TO authenticated, service_role;
+
+-- 5. Update jobbot.require_grok_intelligence_auth to use unified validator
+-- Eliminates hardcoded client ID across all recruitment RPCs
+CREATE OR REPLACE FUNCTION jobbot.require_grok_intelligence_auth()
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+DECLARE
+  v_uid uuid := (SELECT auth.uid());
+  v_client_id text := auth.jwt()->>'client_id';
+BEGIN
+  -- Caller must be the designated owner
+  IF v_uid IS DISTINCT FROM 'f2729195-5445-4272-ab85-cac5b03b0967'::uuid THEN
+    RAISE EXCEPTION 'Owner authentication required';
+  END IF;
+
+  -- If OAuth client_id is present, must be an active, verified Grok client with owner consent
+  IF v_client_id IS NOT NULL THEN
+    IF v_client_id !~* '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$' THEN
+      RAISE EXCEPTION 'Invalid OAuth client_id format';
+    END IF;
+
+    IF NOT jobbot.validate_grok_oauth_client(v_client_id::uuid, v_uid) THEN
+      RAISE EXCEPTION 'Unauthorized OAuth client: %', v_client_id;
+    END IF;
+  END IF;
+
+  -- First party sessions (v_client_id IS NULL) must satisfy owner session check
+  IF v_client_id IS NULL THEN
+    PERFORM jobbot.require_owner_processing_auth();
+  END IF;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION jobbot.require_grok_intelligence_auth() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION jobbot.require_grok_intelligence_auth() TO authenticated, service_role;
