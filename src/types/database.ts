@@ -30,30 +30,40 @@ export interface DbJobOpportunity {
 
 export interface DbJobApplication {
   id: string;
-  opportunity_id: string;
-  company: string;
-  job_title: string;
+  opportunity_id?: string;
+  company?: string;
+  job_title?: string;
   requisition_id?: string | null;
   posting_url?: string | null;
   application_url?: string | null;
   resume_version?: string | null;
   cover_letter_version?: string | null;
   applied_at?: string | null;
-  timezone: string;
-  application_status: string; // 'Applied Confirmed', 'Reported Submitted', 'Submitted Unverified', etc.
-  user_approval_status: string;
+  timezone?: string;
+  application_status?: string; // 'Applied Confirmed', 'Reported Submitted', 'Submitted Unverified', etc.
+  status?: string; // tracker alias
+  user_approval_status?: string;
   user_approval_at?: string | null;
   submission_evidence?: string | null;
   confirmation_id?: string | null;
   confirmation_email_ref?: string | null;
   hiring_stage?: string | null; // null, 'Rejected', 'Assessment Requested', 'Interview', 'Offer'
   notes?: string | null;
-  verification_status: string;
+  verification_status?: string;
   verification_source?: string | null;
   verified_at?: string | null;
   original_tracker_status?: string | null;
   resume_document_id?: string | null;
   cover_letter_document_id?: string | null;
+  recruiter_name?: string | null;
+  recruiter_email?: string | null;
+  score?: number | string | null;
+  role?: string;
+  source_apply_mode?: string;
+  follow_up_at?: string | null;
+  timeline_json?: any;
+  job?: any;
+  jobs?: any;
   created_at: string;
   updated_at: string;
 
@@ -114,29 +124,37 @@ export interface DbRecruitmentReviewItem {
 
 export interface DbOutreachContact {
   id: string;
-  owner_id: string;
-  full_name: string;
+  owner_id?: string;
+  full_name?: string;
+  name?: string;
   company?: string | null;
   professional_title?: string | null;
-  category: "recruiter" | "hiring_manager" | "peer" | "founder" | "other" | string;
+  role?: string | null;
+  category?: "recruiter" | "hiring_manager" | "peer" | "founder" | "other" | string;
+  contact_type?: "recruiter" | "hiring_manager" | "peer" | "founder" | "other" | string;
   linkedin_url?: string | null;
   team_affiliation?: string | null;
   team_verification?: string | null;
   relevance_score?: number | null;
+  score?: number | null;
   technical_overlap?: string | null;
   personalization_context?: string | null;
+  connection_note?: string | null;
+  follow_up_note?: string | null;
   application_id?: string | null;
+  matched_application_id?: string | null;
   opportunity_id?: string | null;
-  connection_stage: string;
-  reply_state: string;
-  priority: "high" | "medium" | "low" | string;
+  connection_stage?: string;
+  status?: "research" | "draft_pending_approval" | "approved" | "sent" | "connected" | "in_conversation" | "rejected" | "postponed" | string;
+  reply_state?: string;
+  priority?: "high" | "medium" | "low" | string;
   last_interaction_at?: string | null;
   next_action?: string | null;
   follow_up_at?: string | null;
   notes?: string | null;
   evidence_source?: string | null;
   last_verified_at?: string | null;
-  do_not_contact: boolean;
+  do_not_contact?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -152,3 +170,28 @@ export interface DbSyncLog {
   errors: any;
   verification_results: any;
 }
+
+// Compatibility aliases for dashboard view models
+export type DbJob = DbJobOpportunity;
+export type DbApplication = DbJobApplication;
+
+export interface DbEmailEvent {
+  id: string;
+  gmail_message_id?: string;
+  thread_id?: string | null;
+  from_email?: string;
+  sender?: string;
+  subject: string;
+  snippet?: string | null;
+  body_excerpt?: string | null;
+  received_at?: string;
+  receivedAt?: string;
+  classification?: "interview" | "rejection" | "assessment" | "offer" | "acknowledgement" | "needs_review" | string;
+  confidence?: number | null;
+  matched_job_id?: string | null;
+  matched_application_id?: string | null;
+  action_taken?: string | null;
+  actionTaken?: string | null;
+  created_at?: string;
+}
+

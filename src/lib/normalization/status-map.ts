@@ -26,7 +26,7 @@ export function normalizeStatus(
   }
 
   // Strip markdown, dates, or bold brackets: e.g. "**Applied** (2026-10-30)" -> "applied"
-  const cleaned = rawStatus
+  const cleaned = effectiveRaw
     .replace(/\*\*/g, "")
     .replace(/\([^)]*\)/g, "")
     .replace(/[❌✅]/g, "")
@@ -98,7 +98,7 @@ export function normalizeStatus(
   // Preserve as unmapped explicitly
   return {
     normalized: "unmapped",
-    canonicalLabel: rawStatus.trim(),
+    canonicalLabel: effectiveRaw.trim(),
     isUnmapped: true,
   };
 }
