@@ -6,17 +6,9 @@ import { z } from 'npm:zod@4.3.6';
 
 import { recordTransportError } from './transport-diagnostic.mjs';
 import { recordToolList } from './discovery.mjs';
-import { claimFixture, completeFixture, readFixture } from './fixture.mjs';
 
 const DIAGNOSTIC_UNTIL = Date.parse('2026-11-08T22:57:09.877Z');
 
-const ids = { work_id: z.uuidv4(), revision_id: z.uuidv4() };
-const claimInput = z.strictObject({ ...ids, request_id: z.uuidv4() });
-const completeInput = z.strictObject({ ...ids, claim_id: z.uuidv4() });
-
-function result(data: unknown) {
-  return { content: [{ type: 'text' as const, text: JSON.stringify(data) }] };
-}
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ACTIVE_GROK_CLIENT_ID = '16bdb57f-c2cd-40d8-b6e1-c1a1b17e3f32';
 const TRUSTED_CLIENT_IDS = new Set([
@@ -40,7 +32,7 @@ const handler = pipeline(
     if (!clientId || typeof clientId !== 'string' || !UUID_REGEX.test(clientId)) {
       return Response.json({ error: 'Present and valid OAuth client_id required' }, { status: 403 });
     }
-    // 4. Explicitly approved client ID check
+    // 4. Explicitly approved client ID check (reject unknown / dynamic clients)
     if (!TRUSTED_CLIENT_IDS.has(clientId)) {
       return Response.json({ error: 'Unauthorized OAuth client' }, { status: 403 });
     }
@@ -61,6 +53,7 @@ const handler = pipeline(
     }
     const mcp = createMcpHandler(() => {
       const server = new McpServer({ name: 'jf-grok-owner-mcp', version: '0.2.0' });
+      // Only register read-only runtime_status; do not advertise mutation tools in tools/list
       server.registerTool(
         'runtime_status',
         {
@@ -75,17 +68,6 @@ const handler = pipeline(
           return { content: [{ type: 'text', text: JSON.stringify(data) }] };
         },
       );
-      const rpc = ctx.supabase.rpc.bind(ctx.supabase);
-      server.registerTool('claim_work', {
-        description: 'Claim the single enrolled synthetic fixture. Never sends or returns recipient details.',
-        inputSchema: claimInput,
-        annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
-      }, async (input) => result(await claimFixture(rpc, readFixture(Deno.env.get('JF_OWNER_FIXTURE')), claimInput.parse(input))));
-      server.registerTool('complete_work', {
-        description: 'Record a fixed no-delivery receipt for the enrolled synthetic fixture.',
-        inputSchema: completeInput,
-        annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
-      }, async (input) => result(await completeFixture(rpc, readFixture(Deno.env.get('JF_OWNER_FIXTURE')), completeInput.parse(input))));
       return server;
     });
     const response = await mcp.fetch(req);

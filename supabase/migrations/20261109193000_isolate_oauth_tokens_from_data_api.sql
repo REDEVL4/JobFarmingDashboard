@@ -626,19 +626,19 @@ CREATE OR REPLACE FUNCTION public.jf_owner_runtime_status()
  SECURITY DEFINER
  SET search_path TO ''
 AS $function$
-DECLARE cfg jobbot.outreach_webhook_config; m jobbot.monitor_settings; cid text;
+DECLARE cfg jobbot.outreach_webhook_config; m jobbot.monitor_settings; v_client_id text;
 BEGIN
- PERFORM jobbot.require_owner_processing_auth();
- cid := auth.jwt()->>'client_id';
+ v_client_id := auth.jwt()->>'client_id';
  -- If client_id is present, it MUST be the explicitly approved Grok client ID
- IF cid IS NOT NULL AND cid != '16bdb57f-c2cd-40d8-b6e1-c1a1b17e3f32' THEN
-   RAISE EXCEPTION 'Unauthorized OAuth client';
+ IF v_client_id IS NOT NULL AND v_client_id != '16bdb57f-c2cd-40d8-b6e1-c1a1b17e3f32' THEN
+   RAISE EXCEPTION 'Unauthorized OAuth client: %', v_client_id;
  END IF;
+ PERFORM jobbot.require_owner_processing_auth();
  SELECT * INTO cfg FROM jobbot.outreach_webhook_config WHERE owner_id=(SELECT auth.uid());
  SELECT * INTO m FROM jobbot.monitor_settings WHERE owner_id=(SELECT auth.uid());
  IF cfg.owner_id IS NULL OR m.owner_id IS NULL THEN RAISE EXCEPTION 'Runtime configuration unavailable'; END IF;
  RETURN jsonb_build_object('owner_user_id',(SELECT auth.uid()),'request_role',current_setting('role',true),
-  'oauth_client_id',cid,'owner_session_checked',true,
+  'oauth_client_id',auth.jwt()->>'client_id','owner_session_checked',true,
   'work_dispatch_enabled',cfg.enabled,'ai_dispatch_enabled',m.ai_dispatch_enabled,
   'gmail_enabled',m.enabled,'gmail_paused',m.paused,'gmail_poll_minutes',m.poll_interval_minutes,
   'fixture_allowlist_empty',NOT EXISTS(SELECT 1 FROM jobbot.outreach_owner_test_allowlist),
@@ -656,13 +656,15 @@ DECLARE w jobbot.outreach_approval_work; r jobbot.outreach_action_revisions; a j
  x jobbot.outreach_owner_processing; d jobbot.outreach_webhook_dispatches;
 BEGIN
  IF (auth.jwt()->>'client_id') IS NOT NULL THEN
-   RAISE EXCEPTION 'OAuth tokens are not permitted to invoke work mutation functions';
+   RAISE EXCEPTION 'OAuth tokens are not permitted to invoke claim functions';
  END IF;
  PERFORM jobbot.require_owner_processing_auth();
+ -- Explicit work/revision-ID gate; target text never authorizes access.
  PERFORM 1 FROM jobbot.outreach_owner_test_allowlist f
  WHERE f.work_id=p_work_id AND f.revision_id=p_revision_id FOR SHARE;
  IF NOT FOUND THEN RAISE EXCEPTION 'Fixture not allowlisted'; END IF;
  IF p_request_id IS NULL THEN RAISE EXCEPTION 'Explicit request required'; END IF;
+ -- Same validation/lock order as dedicated processing: action/contact/work, then outbox.
  w:=jobbot.webhook_validate_work(p_work_id,ARRAY['queued','verification_required','manual_action_required','failed']);
  IF w.revision_id IS DISTINCT FROM p_revision_id THEN RAISE EXCEPTION 'Revision mismatch'; END IF;
  SELECT * INTO r FROM jobbot.outreach_action_revisions WHERE id=w.revision_id;
@@ -680,6 +682,7 @@ BEGIN
  IF EXISTS(SELECT 1 FROM jobbot.outreach_owner_processing WHERE request_id=p_request_id) THEN RAISE EXCEPTION 'Request already used'; END IF;
  INSERT INTO jobbot.outreach_owner_processing(work_id,owner_id,revision_id,request_id)
  VALUES(w.id,w.owner_id,w.revision_id,p_request_id) RETURNING * INTO x;
+ -- This blocks dedicated reservation/claim without inventing a webhook acceptance.
  UPDATE jobbot.outreach_approval_work SET state='verification_required',execution_started_at=now() WHERE id=w.id;
  INSERT INTO jobbot.outreach_webhook_events(owner_id,event_code,actor_id,actor_kind,correlation_id)
  VALUES(w.owner_id,'owner_processing_claimed',(SELECT auth.uid()),'owner',x.claim_id);
@@ -698,9 +701,10 @@ AS $function$
 DECLARE w jobbot.outreach_approval_work; x jobbot.outreach_owner_processing;
 BEGIN
  IF (auth.jwt()->>'client_id') IS NOT NULL THEN
-   RAISE EXCEPTION 'OAuth tokens are not permitted to invoke work mutation functions';
+   RAISE EXCEPTION 'OAuth tokens are not permitted to invoke completion functions';
  END IF;
  PERFORM jobbot.require_owner_processing_auth();
+ -- Explicit work/revision-ID gate; target text never authorizes access.
  PERFORM 1 FROM jobbot.outreach_owner_test_allowlist f
  WHERE f.work_id=p_work_id AND f.revision_id=p_revision_id FOR SHARE;
  IF NOT FOUND THEN RAISE EXCEPTION 'Fixture not allowlisted'; END IF;
@@ -733,11 +737,9 @@ CREATE OR REPLACE FUNCTION public.jf_configure_work_webhook(p_host text, p_heade
 AS $function$
 BEGIN
  IF (auth.jwt()->>'client_id') IS NOT NULL THEN
-   RAISE EXCEPTION 'OAuth tokens are not permitted to invoke configuration functions';
+   RAISE EXCEPTION 'OAuth tokens are not permitted to invoke webhook configuration functions';
  END IF;
- IF current_setting('role', true) != 'service_role' AND (auth.jwt()->>'role') != 'service_role' THEN
-   IF (SELECT auth.uid()) IS DISTINCT FROM 'f2729195-5445-4272-ab85-cac5b03b0967'::uuid THEN RAISE EXCEPTION 'Owner required'; END IF;
- END IF;
+ IF (SELECT auth.uid()) IS DISTINCT FROM 'f2729195-5445-4272-ab85-cac5b03b0967'::uuid THEN RAISE EXCEPTION 'Owner required'; END IF;
  IF p_host IS NULL OR p_header IS NULL OR p_auth_mode IS NULL OR p_host !~ '^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$' OR p_host NOT LIKE '%.%' OR p_header !~ '^[A-Za-z][A-Za-z0-9-]{0,63}$' OR lower(p_header) IN ('host','content-type','content-length','cookie') OR p_auth_mode NOT IN ('bearer','raw') OR p_panel_verified IS DISTINCT FROM true OR p_processor_user_id IS NULL OR p_processor_user_id=(SELECT auth.uid()) THEN RAISE EXCEPTION 'Verified panel settings and a separate processor identity required'; END IF;
  UPDATE jobbot.outreach_webhook_config SET webhook_host=p_host,header_name=p_header,auth_mode=p_auth_mode,processor_user_id=p_processor_user_id,panel_auth_verified=true,enabled=false,updated_at=now() WHERE owner_id=(SELECT auth.uid());
  INSERT INTO jobbot.outreach_webhook_events(owner_id,event_code,actor_id,actor_kind) VALUES((SELECT auth.uid()),'configuration_saved_disabled',(SELECT auth.uid()),'owner');
@@ -762,13 +764,23 @@ BEGIN
  WHERE owner_id=(SELECT auth.uid()) FOR UPDATE;
  IF cfg.owner_id IS NULL THEN RAISE EXCEPTION 'Configuration unavailable'; END IF;
  IF cfg.enabled OR EXISTS(SELECT 1 FROM jobbot.monitor_settings WHERE owner_id=cfg.owner_id AND ai_dispatch_enabled) THEN
-  RAISE EXCEPTION 'Disable webhook and AI dispatch before rebinding processor';
+  RAISE EXCEPTION 'Both dispatch switches must be disabled';
  END IF;
- UPDATE jobbot.outreach_webhook_config
- SET processor_user_id=p_processor_user_id,panel_auth_verified=false,enabled=false,updated_at=now()
+ IF p_processor_user_id IS NULL OR p_processor_user_id=cfg.owner_id THEN
+  RAISE EXCEPTION 'A separate verified processor identity is required';
+ END IF;
+ PERFORM 1 FROM auth.users WHERE id=p_processor_user_id AND role='authenticated'
+ AND NOT coalesce(is_anonymous,false) AND deleted_at IS NULL AND confirmed_at IS NOT NULL
+ AND (banned_until IS NULL OR banned_until<=now()) FOR SHARE;
+ IF NOT FOUND THEN RAISE EXCEPTION 'Active confirmed Auth user required'; END IF;
+ IF cfg.processor_user_id IS NOT DISTINCT FROM p_processor_user_id THEN RETURN; END IF;
+ IF EXISTS(SELECT 1 FROM jobbot.outreach_webhook_dispatches WHERE owner_id=cfg.owner_id AND state IN ('in_flight','accepted','acceptance_unknown','processing')) THEN
+  RAISE EXCEPTION 'Resolve outstanding dispatches before rebinding';
+ END IF;
+ UPDATE jobbot.outreach_webhook_config SET processor_user_id=p_processor_user_id,updated_at=now()
  WHERE owner_id=cfg.owner_id;
- INSERT INTO jobbot.outreach_webhook_events(owner_id,event_code,actor_id,actor_kind)
- VALUES(cfg.owner_id,'processor_bound_disabled',(SELECT auth.uid()),'owner');
+ INSERT INTO jobbot.outreach_webhook_events(owner_id,event_code,actor_id,actor_kind,correlation_id)
+ VALUES(cfg.owner_id,'processor_bound_disabled:'||p_processor_user_id::text,(SELECT auth.uid()),'owner',gen_random_uuid());
 END $function$;
 
 -- 6. public.jf_confirm_outreach_sent (WORKFLOW MUTATION: Rejects all OAuth tokens)
@@ -783,23 +795,27 @@ BEGIN
  IF (auth.jwt()->>'client_id') IS NOT NULL THEN
    RAISE EXCEPTION 'OAuth tokens are not permitted to invoke confirmation functions';
  END IF;
- IF current_setting('role', true) != 'service_role' AND (auth.jwt()->>'role') != 'service_role' THEN
-   IF (SELECT auth.uid()) IS DISTINCT FROM 'f2729195-5445-4272-ab85-cac5b03b0967'::uuid THEN RAISE EXCEPTION 'Owner required'; END IF;
- END IF;
+ IF (SELECT auth.uid()) IS DISTINCT FROM 'f2729195-5445-4272-ab85-cac5b03b0967'::uuid THEN RAISE EXCEPTION 'Owner required'; END IF;
  w:=jobbot.webhook_validate_work(p_work_id,ARRAY['manual_action_required','verification_required','sent_verified']);
  IF w.revision_id IS DISTINCT FROM p_revision_id THEN RAISE EXCEPTION 'Revision mismatch'; END IF;
  IF p_recipient_confirmed IS DISTINCT FROM true OR p_sent_at IS NULL OR p_sent_at<w.approved_at OR p_sent_at>now() THEN RAISE EXCEPTION 'Confirm recipient and actual delivery time'; END IF;
  IF p_evidence_source IS NULL OR p_evidence_source NOT IN ('linkedin_sent_view','linkedin_export','authorized_provider_receipt') OR coalesce(length(trim(p_evidence_ref)),0)<8 OR length(p_evidence_ref)>1000 OR p_evidence_ref ~* '(bearer[[:space:]]|sb_secret_|service_role|access_token=|token=|key=)' THEN RAISE EXCEPTION 'Credible delivery evidence required; no credentials'; END IF;
  evidence:=p_evidence_source||':'||trim(p_evidence_ref);
  SELECT * INTO a FROM jobbot.outreach_actions WHERE id=w.action_id;
- event_kind:=CASE a.action_type WHEN 'connect' THEN 'linkedin_connection_sent' WHEN 'message' THEN 'linkedin_message_sent' WHEN 'inmail' THEN 'linkedin_inmail_sent' ELSE 'outreach_sent' END;
- INSERT INTO jobbot.outreach_interactions(owner_id,contact_id,action_id,revision_id,event_type,channel,direction,message_summary,event_at,verification,evidence_source,evidence_ref,application_id,external_key)
- VALUES(w.owner_id,a.contact_id,w.action_id,w.revision_id,event_kind,a.channel,'outbound',left(coalesce(r.body,''),280),p_sent_at,'verified',p_evidence_source,p_evidence_ref,r.application_id,a.action_type||':'||w.id::text)
- RETURNING id INTO old_event;
- UPDATE jobbot.outreach_approval_work SET state='sent_verified',executed_at=p_sent_at,acknowledged_at=now(),result_evidence=evidence WHERE id=w.id;
- INSERT INTO jobbot.outreach_webhook_events(owner_id,event_code,actor_id,actor_kind,correlation_id)
- VALUES(w.owner_id,'outreach_delivery_confirmed',(SELECT auth.uid()),'owner',w.id);
- RETURN w.id;
+ SELECT * INTO r FROM jobbot.outreach_action_revisions WHERE id=w.revision_id;
+ IF a.contact_id IS NULL THEN RAISE EXCEPTION 'A matched contact is required'; END IF;
+ event_kind:=CASE WHEN a.action_type='connection_invitation' THEN 'invitation_sent' WHEN a.action_type='share_document' THEN 'resume_shared' WHEN a.action_type IN ('direct_message','inmail','reply','follow_up','email','referral_request') THEN 'message_sent' ELSE NULL END;
+ IF event_kind IS NULL THEN RAISE EXCEPTION 'This action needs a separate evidence workflow'; END IF;
+ SELECT id INTO old_event FROM jobbot.outreach_interactions WHERE owner_id=w.owner_id AND external_key='work:'||w.id||':verified-send';
+ IF w.state='sent_verified' THEN
+  IF old_event IS NOT NULL AND w.result_evidence=evidence AND w.sent_confirmed_at=p_sent_at THEN RETURN old_event; END IF;
+  RAISE EXCEPTION 'Already confirmed with different evidence';
+ END IF;
+ IF EXISTS(SELECT 1 FROM jobbot.outreach_interactions WHERE revision_id=w.revision_id AND event_type=event_kind) THEN RAISE EXCEPTION 'Existing send record requires reconciliation'; END IF;
+ INSERT INTO jobbot.outreach_interactions(owner_id,contact_id,action_id,revision_id,event_type,channel,direction,message_summary,event_at,verification,evidence_source,evidence_ref,external_key,application_id)
+ VALUES(w.owner_id,a.contact_id,a.id,r.id,event_kind,a.channel,'outbound','Owner manually verified delivery of this exact revision',p_sent_at,'verified',p_evidence_source,trim(p_evidence_ref),'work:'||w.id||':verified-send',r.application_id) RETURNING id INTO old_event;
+ UPDATE jobbot.outreach_approval_work SET state='sent_verified',sent_confirmed_at=p_sent_at,result_evidence=evidence WHERE id=w.id;
+ RETURN old_event;
 END $function$;
 
 -- 7. public.jf_retry_rejected_work_webhook (MANAGEMENT RPC: Rejects all OAuth tokens)
@@ -814,15 +830,15 @@ BEGIN
  IF (auth.jwt()->>'client_id') IS NOT NULL THEN
    RAISE EXCEPTION 'OAuth tokens are not permitted to invoke retry functions';
  END IF;
- IF current_setting('role', true) != 'service_role' AND (auth.jwt()->>'role') != 'service_role' THEN
-   IF (SELECT auth.uid()) IS DISTINCT FROM 'f2729195-5445-4272-ab85-cac5b03b0967'::uuid THEN RAISE EXCEPTION 'Owner required'; END IF;
- END IF;
+ IF (SELECT auth.uid()) IS DISTINCT FROM 'f2729195-5445-4272-ab85-cac5b03b0967'::uuid THEN RAISE EXCEPTION 'Owner required'; END IF;
  SELECT * INTO d FROM jobbot.outreach_webhook_dispatches WHERE id=p_dispatch_id AND owner_id=(SELECT auth.uid());
  IF d.id IS NULL THEN RAISE EXCEPTION 'Dispatch unavailable'; END IF;
  PERFORM jobbot.webhook_validate_work(d.work_id,ARRAY['queued']);
  SELECT * INTO d FROM jobbot.outreach_webhook_dispatches WHERE id=p_dispatch_id FOR UPDATE;
  IF d.state<>'rejected' OR d.attempts>=3 THEN RAISE EXCEPTION 'Retry requires a definite rejection and remaining attempts'; END IF;
  UPDATE jobbot.outreach_webhook_dispatches SET state='pending',http_status=NULL WHERE id=d.id;
+ INSERT INTO jobbot.outreach_webhook_events(owner_id,dispatch_id,event_code,actor_id,actor_kind) VALUES(d.owner_id,d.id,'owner_retry_requested',(SELECT auth.uid()),'owner');
+ PERFORM jobbot.webhook_signal(d.id);
 END $function$;
 
 -- 8. public.jf_wake_pending_work_webhook (MANAGEMENT RPC: Rejects all OAuth tokens)
@@ -837,9 +853,7 @@ BEGIN
  IF (auth.jwt()->>'client_id') IS NOT NULL THEN
    RAISE EXCEPTION 'OAuth tokens are not permitted to invoke webhook wake functions';
  END IF;
- IF current_setting('role', true) != 'service_role' AND (auth.jwt()->>'role') != 'service_role' THEN
-   IF (SELECT auth.uid()) IS DISTINCT FROM 'f2729195-5445-4272-ab85-cac5b03b0967'::uuid THEN RAISE EXCEPTION 'Owner required'; END IF;
- END IF;
+ IF (SELECT auth.uid()) IS DISTINCT FROM 'f2729195-5445-4272-ab85-cac5b03b0967'::uuid THEN RAISE EXCEPTION 'Owner required'; END IF;
  SELECT * INTO d FROM jobbot.outreach_webhook_dispatches WHERE id=p_dispatch_id AND owner_id=(SELECT auth.uid());
  IF d.id IS NULL OR d.state<>'pending' THEN RAISE EXCEPTION 'Pending dispatch required'; END IF;
  PERFORM jobbot.webhook_validate_work(d.work_id,ARRAY['queued']);

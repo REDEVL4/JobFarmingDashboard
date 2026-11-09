@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import {
   DESIGNATED_OWNER_UUID,
   DESIGNATED_OWNER_EMAIL,
@@ -385,6 +386,23 @@ test("MCP: strictly denies unauthorized callers and tools", () => {
     evaluateMcpAuth({ sub: DESIGNATED_OWNER_UUID, role: "authenticated", client_id: "67fc4ec0-f2cb-47ee-820d-b8649a08c761" }).allowed,
     false
   );
+});
+
+// ---------------------------------------------------------------------------
+// 12. MCP Tool List Discovery (Only runtime_status exposed)
+// ---------------------------------------------------------------------------
+test("MCP: tools/list exposes only runtime_status and advertises zero mutation tools", () => {
+  const edgeFunctionSource = fs.readFileSync(
+    "supabase/functions/jf-grok-owner-mcp/index.ts",
+    "utf-8"
+  );
+
+  // Assert runtime_status is registered
+  assert.match(edgeFunctionSource, /server\.registerTool\(\s*['"]runtime_status['"]/);
+
+  // Assert claim_work and complete_work are NOT registered
+  assert.doesNotMatch(edgeFunctionSource, /server\.registerTool\(\s*['"]claim_work['"]/);
+  assert.doesNotMatch(edgeFunctionSource, /server\.registerTool\(\s*['"]complete_work['"]/);
 });
 
 // ---------------------------------------------------------------------------
