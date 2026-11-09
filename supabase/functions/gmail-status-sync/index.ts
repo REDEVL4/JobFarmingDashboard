@@ -9,6 +9,9 @@ import {
 import {
   executeGmailSync,
   HistoryExpiredError,
+  fetchMessageWithRetry,
+  PermanentMessageInaccessibleError,
+  TransientMessageFetchError,
 } from "./history-sync.ts";
 import {
   checkSensitiveMessage,
@@ -25,6 +28,7 @@ import type {
   ReviewReasonCode,
   SyncRunResult,
   GmailQueueItem,
+  ExecutionMode,
 } from "./types.ts";
 
 const OWNER_EMAIL = "govardhanreddy.vys7@gmail.com";
@@ -223,19 +227,47 @@ Deno.serve(async (req) => {
     body = {};
   }
 
-  // 3. HARDENED LIVE-WRITE GATE ENFORCEMENT:
-  // A request specifying dry_run: false MUST NEVER be sufficient to enable live writes.
-  // Both the request and the server-side configuration gate ENABLE_GMAIL_STATUS_WRITES must be explicitly true.
-  const serverGateEnabled =
+  // 3. EXECUTION MODE & SERVER GATES ENFORCEMENT:
+  // Three distinct execution modes:
+  // - diagnostic_dry_run: inspect & report only; zero queue or application mutations (default).
+  // - ingestion_only: persist Gmail metadata & advance ingestion cursor; zero application/review updates.
+  // - live_updates: reserved for a later, separately authorized deployment (do not enable).
+  const serverIngestionEnabled =
+    Deno.env.get("ENABLE_GMAIL_QUEUE_INGESTION") === "true" ||
+    (await getSecret("jf_enable_gmail_queue_ingestion")) === "true";
+
+  const serverLiveWritesEnabled =
     Deno.env.get("ENABLE_GMAIL_STATUS_WRITES") === "true" ||
     (await getSecret("jf_enable_gmail_status_writes")) === "true";
 
-  const requestedLive = body?.dry_run === false;
-  const isLiveWrite = requestedLive && serverGateEnabled;
+  let requestedMode: ExecutionMode;
+  if (body.mode === "live_updates") {
+    requestedMode = "live_updates";
+  } else if (body.mode === "ingestion_only" || (body.dry_run === false && body.mode === undefined)) {
+    requestedMode = "ingestion_only";
+  } else {
+    requestedMode = "diagnostic_dry_run";
+  }
 
-  // Defaults strictly to dry_run: true
-  const dryRun = !isLiveWrite;
-  const liveWriteGateLocked = requestedLive && !serverGateEnabled;
+  let effectiveMode: ExecutionMode = "diagnostic_dry_run";
+  let gateLockedReason: string | null = null;
+
+  if (requestedMode === "live_updates") {
+    effectiveMode = "diagnostic_dry_run";
+    gateLockedReason = "live_updates is reserved for later deployment and strictly gated.";
+  } else if (requestedMode === "ingestion_only") {
+    if (serverIngestionEnabled) {
+      effectiveMode = "ingestion_only";
+    } else {
+      effectiveMode = "diagnostic_dry_run";
+      gateLockedReason = "ENABLE_GMAIL_QUEUE_INGESTION is disabled. Live queue mutations blocked; running diagnostic_dry_run.";
+    }
+  } else {
+    effectiveMode = "diagnostic_dry_run";
+  }
+
+  const dryRun = effectiveMode === "diagnostic_dry_run";
+  const liveWriteGateLocked = Boolean(gateLockedReason);
 
   const gapReconcile: boolean = Boolean(body.gap_reconciliation);
   const maxMessages = Math.min(Number(body.max_messages) || MAX_MESSAGES_PER_RUN, 300);
@@ -271,10 +303,15 @@ Deno.serve(async (req) => {
     }
 
     // 6. HARDENED CHECKPOINT & RESUMABLE BACKFILL RESOLUTION:
-    // Strictly retrieve the latest verified PRODUCTION run (dry_run IS NOT true).
-    // An incomplete backfill (status='partial_backfill') or dry-run log must NEVER
-    // advance the production checkpoint past unprocessed messages.
-    // Handles both JSONB objects and any legacy JSONB strings defensively.
+    // Read the dedicated ingestion cursor from jobbot.sync_cursors first.
+    // An incomplete backfill or dry-run log must NEVER advance the production checkpoint past unprocessed messages.
+    const [cursorRow] = await sql`
+      select last_history_id, last_success_at, last_observed_at, overlap_minutes
+        from jobbot.sync_cursors
+       where source_key = 'gmail_status_ingestion'
+         and owner_id = ${OWNER_UUID}::uuid
+    `.catch(() => []);
+
     const [latestProductionLog] = await sql`
       select started_at, completed_at,
              case 
@@ -297,11 +334,13 @@ Deno.serve(async (req) => {
 
     const scanWindow = resolveScanWindow({
       latestProductionLog,
+      cursorRecord: cursorRow || null,
       gapReconcile,
       lastVerifiedCheckpoint: LAST_VERIFIED_CHECKPOINT,
       overlapMinutes: OVERLAP_MINUTES,
       bodyBeforeEpoch: body.continuation_before_epoch ? Number(body.continuation_before_epoch) : null,
       bodyAfterEpoch: body.continuation_after_epoch ? Number(body.continuation_after_epoch) : null,
+      bodyStartHistoryId: body.start_history_id || null,
     });
 
     // 7. Loss-Resistant Gmail Synchronization (History API + Full Query Fallback)
@@ -351,9 +390,11 @@ Deno.serve(async (req) => {
       }
     }
 
-    // 9. Fetch full messages and sort chronologically (internalDate ascending)
+    // 9. Fetch full messages with bounded retry and preserve failed retrievals
     const fetchedMessages: any[] = [];
     let duplicateCount = 0;
+    const queueItems: GmailQueueItem[] = [];
+    const excludedSensitiveItems: Array<{ messageId: string; reason: string }> = [];
 
     for (const item of rawMessageHeaders) {
       if (isMessageProcessed(item.id, processedMessageIds)) {
@@ -361,10 +402,59 @@ Deno.serve(async (req) => {
         continue;
       }
       try {
-        const msg = await callGmailApi(token, `messages/${item.id}?format=full`);
+        const msg = await fetchMessageWithRetry(token, item.id);
         fetchedMessages.push(msg);
-      } catch (err) {
-        console.warn(`Failed to fetch message ${item.id}:`, err);
+      } catch (err: any) {
+        if (err instanceof PermanentMessageInaccessibleError) {
+          // Permanent 404/410: message deleted or inaccessible
+          const contentHash = await computeContentHash({
+            mailbox: OWNER_EMAIL,
+            messageId: item.id,
+            internalDate: 0,
+            isSensitive: true,
+          });
+          queueItems.push({
+            owner_id: OWNER_UUID,
+            mailbox: OWNER_EMAIL,
+            message_id: item.id,
+            thread_id: item.threadId || item.id,
+            message_timestamp: new Date().toISOString(),
+            history_id: latestHistoryId || null,
+            processing_status: "excluded",
+            content_hash: contentHash,
+            subject_clean: "[INACCESSIBLE]",
+            sender_clean: "unknown",
+            attempt_count: 0,
+            max_attempts: 5,
+            review_status: "ignored",
+            exclusion_reason: "message_deleted_or_inaccessible",
+            error_details: [{ error: err.message, timestamp: new Date().toISOString() }],
+          });
+        } else {
+          // Transient failure (429/5xx/timeout): retain in queue as pending_fetch so it can be retried
+          const contentHash = await computeContentHash({
+            mailbox: OWNER_EMAIL,
+            messageId: item.id,
+            internalDate: 0,
+            isSensitive: true,
+          });
+          queueItems.push({
+            owner_id: OWNER_UUID,
+            mailbox: OWNER_EMAIL,
+            message_id: item.id,
+            thread_id: item.threadId || item.id,
+            message_timestamp: new Date().toISOString(),
+            history_id: latestHistoryId || null,
+            processing_status: "pending_fetch",
+            content_hash: contentHash,
+            subject_clean: "[FETCH_PENDING]",
+            sender_clean: "unknown",
+            attempt_count: 1,
+            max_attempts: 5,
+            review_status: "pending",
+            error_details: [{ error: err?.message || String(err), timestamp: new Date().toISOString() }],
+          });
+        }
       }
     }
 
@@ -395,8 +485,6 @@ Deno.serve(async (req) => {
     }> = [];
 
     const ignoredMessageIds: string[] = [];
-    const queueItems: GmailQueueItem[] = [];
-    const excludedSensitiveItems: Array<{ messageId: string; reason: string }> = [];
 
     let maxInternalDate = 0;
     let minInternalDate = Infinity;
@@ -572,18 +660,17 @@ Deno.serve(async (req) => {
       dryRun,
     });
 
-    // 11. STRICT DRY-RUN EXECUTION BRANCH
-    if (dryRun) {
-      // In DRY RUN mode:
-      // - updated_count is strictly 0 (no actual committed updates)
-      // - proposed updates are recorded separately in verification_results
-      // - checkpoint_advanced is strictly false
-      // - verification_results is stored as a true JSONB object via sql.json
-      // - No sync_cursors advancement
-      // - No application status updates
-      // - No application_events inserts
+    // 11. DIAGNOSTIC DRY-RUN EXECUTION BRANCH
+    if (effectiveMode === "diagnostic_dry_run") {
+      // In DIAGNOSTIC DRY RUN mode:
+      // - Zero queue writes
+      // - Zero cursor advancement
+      // - Zero application updates
+      // - messages_enqueued is strictly 0
+      // - Diagnostic sync log entry recorded
       const dryRunVerificationResults = {
         status: continuation.status,
+        mode: "diagnostic_dry_run",
         dry_run: true,
         mailbox: OWNER_EMAIL,
         sync_strategy: syncResult.strategy,
@@ -603,7 +690,8 @@ Deno.serve(async (req) => {
         continuation_ceiling_time: continuation.nextContinuationCeilingTime,
         continuation_page_token: continuation.hasMoreBacklog ? (pageToken || null) : null,
         messages_discovered: rawMessageHeaders.length,
-        messages_enqueued: queueItems.filter((q) => q.processing_status === "pending").length,
+        messages_enqueued: 0, // Strictly 0 committed rows
+        proposed_queue_items_count: queueItems.length,
         messages_excluded_sensitive: excludedSensitiveItems.length,
         excluded_sensitive_details: excludedSensitiveItems,
         proposed_changes_count: proposedChanges.length,
@@ -611,7 +699,7 @@ Deno.serve(async (req) => {
         duplicate_messages_count: duplicateCount,
         ignored_messages_count: ignoredMessageIds.length,
         proposed_changes: proposedChanges,
-        live_write_gate_locked: liveWriteGateLocked,
+        gate_locked_reason: gateLockedReason,
       };
 
       await sql`
@@ -636,6 +724,8 @@ Deno.serve(async (req) => {
         status: continuation.status as any,
         mailbox: OWNER_EMAIL,
         dryRun: true,
+        executionMode: "diagnostic_dry_run",
+        gateLockedReason: gateLockedReason || undefined,
         gapReconciled: gapReconcile,
         syncStrategy: syncResult.strategy,
         startHistoryId: scanWindow.startHistoryId || null,
@@ -643,16 +733,15 @@ Deno.serve(async (req) => {
         scanStartAt: new Date(scanWindow.queryAfterEpoch * 1000).toISOString(),
         scanEndAt: completedAt,
         messagesFound: rawMessageHeaders.length,
-        messagesEnqueued: queueItems.filter((q) => q.processing_status === "pending").length,
+        messagesEnqueued: 0, // Strictly 0 committed queue rows
         messagesExcludedSensitive: excludedSensitiveItems.length,
-        excludedSensitiveDetails: excludedSensitiveItems,
         messagesClassified: proposedChanges.length + proposedReviews.length,
-        statusChangesConfirmed: 0, // Actual committed updates is zero
-        reviewItemsQueued: 0,     // Actual committed reviews is zero
+        statusChangesConfirmed: 0,
+        reviewItemsQueued: 0,
         duplicateMessagesSkipped: duplicateCount,
         ignoredMessages: ignoredMessageIds,
-        errors: liveWriteGateLocked
-          ? [{ code: "live_writes_gate_locked", detail: "ENABLE_GMAIL_STATUS_WRITES is disabled. Live database mutations blocked." }]
+        errors: gateLockedReason
+          ? [{ code: "gate_locked", detail: gateLockedReason }]
           : [],
         details: {
           proposedChanges,
@@ -664,6 +753,7 @@ Deno.serve(async (req) => {
             evidenceSummary: r.evidenceSummary,
             candidateCount: r.candidateApplications.length,
           })),
+          excludedSensitiveMessages: excludedSensitiveItems,
         },
         hasMoreBacklog: continuation.hasMoreBacklog,
         checkpointAdvanced: false,
@@ -678,111 +768,48 @@ Deno.serve(async (req) => {
       return json(result, 200);
     }
 
-    // 12. ATOMIC LIVE WRITES (Only runs when both requested AND serverGateEnabled is true)
-    let actualCommittedUpdates = 0;
-    let duplicateDeliveriesSkipped = 0;
-    let actualCommittedReviews = 0;
+    // 12. INGESTION ONLY EXECUTION BRANCH
+    // Atomically enqueues message metadata and advances the ingestion checkpoint in jobbot.sync_cursors.
+    // Invariant: NEVER mutates job_applications, application_events, or recruitment_review_items.
+    // Invariant: Any queue insertion failure prevents cursor advancement (throws & rolls back transaction).
+    let actualCommittedQueueRows = 0;
+    let queueEnqueueResult = {
+      totalProcessed: 0,
+      newlyEnqueued: 0,
+      duplicatesSkipped: 0,
+      excludedSensitive: 0,
+    };
 
     await sql.begin(async (tx) => {
-      // Invariant: Enqueue discovered messages into durable processing queue
-      if (queueItems.length > 0) {
-        try {
-          await enqueueDiscoveredMessages(tx, queueItems);
-        } catch (err: any) {
-          console.warn("Queue enqueueing skipped (table may be pending migration):", err?.message || err);
-        }
-      }
+      // 1. Transactional queue insertion (no try/catch swallowing errors)
+      queueEnqueueResult = await enqueueDiscoveredMessages(tx, queueItems);
+      actualCommittedQueueRows = queueEnqueueResult.newlyEnqueued;
 
-      // Invariant: Update application hiring stage ONLY IF corresponding Gmail event was actually inserted.
-      // If event already exists (duplicate), DO NOT update application.
-      for (const change of proposedChanges) {
-        const externalEventId = `gmail-status:${OWNER_EMAIL}:${change.messageId}`;
+      // 2. Advance dedicated sync cursor (ONLY in this transaction!)
+      await tx`
+        insert into jobbot.sync_cursors (
+          owner_id, source_key, last_success_at, last_observed_at,
+          last_history_id, overlap_minutes, initial_lookback_hours,
+          consecutive_failures, updated_at
+        ) values (
+          ${OWNER_UUID}::uuid, 'gmail_status_ingestion',
+          ${completedAt}::timestamptz,
+          ${maxInternalDate > 0 ? new Date(maxInternalDate).toISOString() : completedAt}::timestamptz,
+          ${latestHistoryId || null},
+          ${OVERLAP_MINUTES}, 72, 0, now()
+        )
+        on conflict (owner_id, source_key) do update
+        set last_success_at = ${completedAt}::timestamptz,
+            last_observed_at = coalesce(${maxInternalDate > 0 ? new Date(maxInternalDate).toISOString() : null}::timestamptz, jobbot.sync_cursors.last_observed_at),
+            last_history_id = coalesce(${latestHistoryId || null}, jobbot.sync_cursors.last_history_id),
+            consecutive_failures = 0,
+            updated_at = now()
+      `;
 
-        const inserted = await tx`
-          insert into jobbot.application_events (
-            id, application_id, event_type, previous_status, new_status,
-            event_at, evidence_source, external_event_id, actor, verification_status, notes
-          )
-          select
-            ${crypto.randomUUID()}::uuid,
-            ${change.applicationId}::uuid,
-            'hiring_stage_change',
-            ${change.previousStage},
-            ${change.newStage},
-            ${new Date(change.internalDate).toISOString()}::timestamptz,
-            'gmail',
-            ${externalEventId},
-            'bot',
-            'verified',
-            ${JSON.stringify({
-              kind: "stage_change",
-              mailbox: OWNER_EMAIL,
-              message_id: change.messageId,
-              quote: change.quote,
-              ingested_at: completedAt,
-            })}::jsonb
-          where not exists (
-            select 1 from jobbot.application_events
-             where external_event_id = ${externalEventId}
-          )
-          returning id
-        `;
-
-        if (inserted && inserted.length > 0) {
-          // Event was ACTUALLY inserted for the first time -> update application hiring stage
-          await tx`
-            update jobbot.job_applications
-               set hiring_stage = ${change.newStage},
-                   updated_at = now()
-             where id = ${change.applicationId}::uuid
-          `;
-          actualCommittedUpdates++;
-        } else {
-          // Event already exists (duplicate or concurrent delivery) -> skip application update
-          duplicateDeliveriesSkipped++;
-        }
-      }
-
-      // Insert ambiguous matches into review queue ONLY IF not already existing
-      for (const review of proposedReviews) {
-        const insertedReview = await tx`
-          insert into jobbot.recruitment_review_items (
-            id, mailbox, message_id, thread_id, event_at,
-            reason_code, proposed_stage, candidate_applications,
-            evidence_summary, state, created_at, updated_at
-          )
-          select
-            ${crypto.randomUUID()}::uuid,
-            ${review.mailbox},
-            ${review.messageId},
-            ${review.threadId},
-            ${review.eventAt}::timestamptz,
-            ${review.reasonCode},
-            ${review.proposedStage},
-            ${sql.json(review.candidateApplications)},
-            ${review.evidenceSummary},
-            'open',
-            now(),
-            now()
-          where not exists (
-            select 1 from jobbot.recruitment_review_items
-             where mailbox = ${review.mailbox}
-               and message_id = ${review.messageId}
-          )
-          returning id
-        `;
-
-        if (insertedReview && insertedReview.length > 0) {
-          actualCommittedReviews++;
-        }
-      }
-
-      // Record live production sync_log
-      // Invariant: An incomplete backfill (hasMoreBacklog=true) MUST NEVER create a log
-      // that can advance the checkpoint past unprocessed messages!
-      // Serializes errors and verification_results as true JSONB objects/arrays via sql.json
+      // 3. Write ingestion sync log
       const liveVerificationResults = {
         status: continuation.status,
+        mode: "ingestion_only",
         dry_run: false,
         mailbox: OWNER_EMAIL,
         sync_strategy: syncResult.strategy,
@@ -796,19 +823,19 @@ Deno.serve(async (req) => {
         last_gmail_scan_at: completedAt,
         has_more_backlog: continuation.hasMoreBacklog,
         all_pages_complete: continuation.allPagesComplete,
-        checkpoint_advanced: continuation.checkpointAdvanced,
+        checkpoint_advanced: true,
         continuation_before_epoch: continuation.nextContinuationBeforeEpoch,
         continuation_after_epoch: continuation.nextContinuationAfterEpoch,
         continuation_ceiling_time: continuation.nextContinuationCeilingTime,
         continuation_page_token: continuation.hasMoreBacklog ? (pageToken || null) : null,
         messages_discovered: rawMessageHeaders.length,
-        messages_enqueued: queueItems.filter((q) => q.processing_status === "pending").length,
-        messages_excluded_sensitive: excludedSensitiveItems.length,
-        excluded_sensitive_details: excludedSensitiveItems,
-        updated_count: actualCommittedUpdates,
-        duplicate_deliveries_skipped: duplicateDeliveriesSkipped,
-        review_queued_count: actualCommittedReviews,
-        latest_successful_database_write_at: completedAt,
+        messages_enqueued: actualCommittedQueueRows,
+        messages_excluded_sensitive: queueEnqueueResult.excludedSensitive,
+        duplicates_skipped: queueEnqueueResult.duplicatesSkipped,
+        pending_fetch_count: queueItems.filter((q) => q.processing_status === "pending_fetch").length,
+        updated_count: 0,
+        statusChangesConfirmed: 0,
+        latest_successful_ingestion_at: completedAt,
       };
 
       await tx`
@@ -818,7 +845,8 @@ Deno.serve(async (req) => {
           errors, verification_results
         ) values (
           ${runId}::uuid, ${BOT_NAME}, ${startedAt}::timestamptz, ${completedAt}::timestamptz,
-          ${0}, ${actualCommittedUpdates}, ${duplicateCount + ignoredMessageIds.length + duplicateDeliveriesSkipped},
+          ${actualCommittedQueueRows}, 0,
+          ${queueEnqueueResult.duplicatesSkipped + queueEnqueueResult.excludedSensitive},
           ${sql.json([])},
           ${sql.json(liveVerificationResults)}
         )
@@ -829,17 +857,19 @@ Deno.serve(async (req) => {
       runId,
       status: continuation.hasMoreBacklog ? "partial_backfill_succeeded" : "sync_succeeded",
       dryRun: false,
+      executionMode: "ingestion_only",
       syncStrategy: syncResult.strategy,
       startHistoryId: scanWindow.startHistoryId || null,
       latestHistoryId: latestHistoryId || null,
-      messagesEnqueued: queueItems.filter((q) => q.processing_status === "pending").length,
-      messagesExcludedSensitive: excludedSensitiveItems.length,
-      excludedSensitiveDetails: excludedSensitiveItems,
-      updated: actualCommittedUpdates,
-      duplicateDeliveriesSkipped,
-      reviewsQueued: actualCommittedReviews,
+      messagesFound: rawMessageHeaders.length,
+      messagesEnqueued: actualCommittedQueueRows,
+      messagesExcludedSensitive: queueEnqueueResult.excludedSensitive,
+      duplicatesSkipped: queueEnqueueResult.duplicatesSkipped,
+      updated: 0,
+      statusChangesConfirmed: 0,
+      reviewsQueued: 0,
       hasMoreBacklog: continuation.hasMoreBacklog,
-      checkpointAdvanced: continuation.checkpointAdvanced,
+      checkpointAdvanced: true,
       continuation: continuation.hasMoreBacklog ? {
         beforeEpoch: continuation.nextContinuationBeforeEpoch,
         afterEpoch: continuation.nextContinuationAfterEpoch,

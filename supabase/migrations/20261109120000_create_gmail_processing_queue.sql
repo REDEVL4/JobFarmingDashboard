@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS jobbot.gmail_processing_queue (
     CONSTRAINT gmail_processing_queue_mailbox_message_unique 
         UNIQUE (mailbox, message_id),
     CONSTRAINT gmail_processing_queue_status_check 
-        CHECK (processing_status IN ('pending', 'claimed', 'completed', 'failed', 'skipped', 'excluded')),
+        CHECK (processing_status IN ('pending', 'pending_fetch', 'claimed', 'completed', 'failed', 'skipped', 'excluded')),
     CONSTRAINT gmail_processing_queue_review_status_check 
         CHECK (review_status IN ('pending', 'requires_review', 'auto_approved', 'user_approved', 'user_rejected', 'ignored'))
 );
@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS jobbot.gmail_processing_queue (
 -- Index 1: High-concurrency worker claim with FOR UPDATE SKIP LOCKED
 CREATE INDEX IF NOT EXISTS idx_gmail_queue_worker_claim 
     ON jobbot.gmail_processing_queue (mailbox, processing_status, lease_expires_at) 
-    WHERE processing_status IN ('pending', 'claimed');
+    WHERE processing_status IN ('pending', 'pending_fetch', 'claimed');
 
 -- Index 2: Chronological ordering & timestamp lookups
 CREATE INDEX IF NOT EXISTS idx_gmail_queue_timestamp 
@@ -103,4 +103,30 @@ INSERT INTO jobbot.monitor_sources (
     now()
 ) ON CONFLICT (source_key) DO UPDATE
 SET updated_at = now();
+
+-- Register initial cursor for Gmail Ingestion
+INSERT INTO jobbot.sync_cursors (
+    owner_id,
+    source_key,
+    last_success_at,
+    last_observed_at,
+    last_external_id,
+    last_history_id,
+    overlap_minutes,
+    initial_lookback_hours,
+    consecutive_failures,
+    updated_at
+) VALUES (
+    'f2729195-5445-4272-ab85-cac5b03b0967'::uuid,
+    'gmail_status_ingestion',
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    15,
+    72,
+    0,
+    now()
+) ON CONFLICT (owner_id, source_key) DO NOTHING;
+
 

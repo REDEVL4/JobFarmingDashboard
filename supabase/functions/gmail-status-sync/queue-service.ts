@@ -66,6 +66,7 @@ export async function enqueueDiscoveredMessages(
         max_attempts,
         review_status,
         exclusion_reason,
+        error_details,
         created_at,
         updated_at
       ) values (
@@ -83,6 +84,7 @@ export async function enqueueDiscoveredMessages(
         ${item.max_attempts || 5},
         ${item.review_status || 'pending'},
         ${item.exclusion_reason || null},
+        ${item.error_details ? sql.json(item.error_details) : sql.json([])},
         now(),
         now()
       )
@@ -127,7 +129,7 @@ export async function claimQueueBatch(
         from jobbot.gmail_processing_queue
        where mailbox = ${mailbox}
          and (
-           processing_status = 'pending'
+           processing_status in ('pending', 'pending_fetch')
            or (processing_status = 'claimed' and lease_expires_at < now())
          )
          and attempt_count < max_attempts
@@ -232,8 +234,7 @@ export async function failQueueItem(
            review_status = case when attempt_count >= max_attempts then 'requires_review' else review_status end,
            lease_token = null,
            lease_expires_at = null,
-           error_details = jsonb_build_array(
-             coalesce(error_details, '[]'::jsonb),
+           error_details = coalesce(error_details, '[]'::jsonb) || jsonb_build_array(
              jsonb_build_object('error', ${error}, 'timestamp', now())
            ),
            updated_at = now()

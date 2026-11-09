@@ -23,11 +23,17 @@ export type ReviewReasonCode =
 
 export type QueueProcessingStatus =
   | "pending"
+  | "pending_fetch"
   | "claimed"
   | "completed"
   | "failed"
   | "skipped"
   | "excluded";
+
+export type ExecutionMode =
+  | "diagnostic_dry_run"
+  | "ingestion_only"
+  | "live_updates";
 
 export type QueueReviewStatus =
   | "pending"
@@ -164,6 +170,8 @@ export interface SyncRunResult {
   status: "dry_run_completed" | "sync_succeeded" | "failed" | "source_unavailable" | "partial_backfill_succeeded";
   mailbox: string;
   dryRun: boolean;
+  executionMode?: ExecutionMode;
+  gateLockedReason?: string;
   gapReconciled: boolean;
   syncStrategy?: "history" | "query_full" | "gap_reconciliation";
   startHistoryId?: string | null;

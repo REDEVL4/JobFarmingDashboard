@@ -15,6 +15,24 @@ export class HistoryExpiredError extends Error {
   }
 }
 
+export class PermanentMessageInaccessibleError extends Error {
+  statusCode: number;
+  constructor(messageId: string, statusCode = 404) {
+    super(`Gmail message ${messageId} is permanently inaccessible (HTTP ${statusCode})`);
+    this.name = "PermanentMessageInaccessibleError";
+    this.statusCode = statusCode;
+  }
+}
+
+export class TransientMessageFetchError extends Error {
+  statusCode?: number;
+  constructor(messageId: string, errorDetail: string, statusCode?: number) {
+    super(`Transient error fetching Gmail message ${messageId}: ${errorDetail}`);
+    this.name = "TransientMessageFetchError";
+    this.statusCode = statusCode;
+  }
+}
+
 export interface DiscoveredMessageHeader {
   id: string;
   threadId: string;
@@ -84,6 +102,7 @@ export async function syncViaGmailHistory(params: {
   const discoveredMap = new Map<string, DiscoveredMessageHeader>();
   let currentPageToken = pageToken || "";
   let highestHistoryId: string | null = null;
+  let lastFullyConsumedHistoryRecordId: string | null = null;
   let reachedLimit = false;
 
   do {
@@ -107,6 +126,12 @@ export async function syncViaGmailHistory(params: {
 
     const historyRecords = historyData.history || [];
     for (const record of historyRecords) {
+      // Lossless continuation: If already at or above maxMessages threshold, STOP before starting a new record
+      if (discoveredMap.size >= maxMessages) {
+        reachedLimit = true;
+        break;
+      }
+
       if (record.id && (!highestHistoryId || BigInt(record.id) > BigInt(highestHistoryId))) {
         highestHistoryId = String(record.id);
       }
@@ -144,6 +169,12 @@ export async function syncViaGmailHistory(params: {
         }
       }
 
+      // Mark this history record as fully consumed
+      if (record.id) {
+        lastFullyConsumedHistoryRecordId = String(record.id);
+      }
+
+      // If completing this record reached or exceeded limit, stop cleanly after full record consumption
       if (discoveredMap.size >= maxMessages) {
         reachedLimit = true;
         break;
@@ -158,17 +189,24 @@ export async function syncViaGmailHistory(params: {
 
   const hasMoreBacklog = Boolean(currentPageToken) || reachedLimit;
 
+  // Invariant: If stopped with backlog remaining, checkpoint MUST NOT advance past the last
+  // fully consumed history record ID, so the next poll resumes strictly without skipped records.
+  const resolvedLatestHistoryId = hasMoreBacklog
+    ? (lastFullyConsumedHistoryRecordId || startHistoryId)
+    : (highestHistoryId || lastFullyConsumedHistoryRecordId || startHistoryId);
+
   return {
     messages: Array.from(discoveredMap.values()),
-    latestHistoryId: highestHistoryId || startHistoryId,
+    latestHistoryId: resolvedLatestHistoryId,
     hasMoreBacklog,
-    nextPageToken: currentPageToken || null,
+    nextPageToken: reachedLimit ? null : (currentPageToken || null),
   };
 }
 
 /**
  * Loss-resistant full sync fallback using Gmail messages.list.
  * Removes INBOX/SENT restrictions to capture archived and custom-labeled emails.
+ * Does not exclude senders via query; sensitive filtering is applied post-discovery.
  */
 export async function syncViaGmailFullSearch(params: {
   token: string;
@@ -185,13 +223,11 @@ export async function syncViaGmailFullSearch(params: {
   const { token, queryAfterEpoch, queryBeforeEpoch, maxMessages, pageToken } = params;
 
   // Build loss-resistant search query without restrictive label:INBOX OR label:SENT
-  // Captures archived emails, promotions, updates, and custom ATS labels
+  // and without hardcoded sender exclusions (filtering happens post-discovery)
   let gmailQuery = `after:${queryAfterEpoch}`;
   if (queryBeforeEpoch) {
     gmailQuery += ` before:${queryBeforeEpoch}`;
   }
-  // Exclude system security notifications, but do NOT filter by recruitment keywords upfront
-  gmailQuery += ` -from:security-noreply@* -from:notifications@google.com`;
 
   const discovered: DiscoveredMessageHeader[] = [];
   let currentPageToken = pageToken || "";
@@ -233,6 +269,58 @@ export async function syncViaGmailFullSearch(params: {
     hasMoreBacklog,
     nextPageToken: currentPageToken || null,
   };
+}
+
+/**
+ * Fetches full message payload with bounded retries and backoff.
+ * Differentiates permanent inaccessible messages (404/410) from transient failures (429/5xx).
+ */
+export async function fetchMessageWithRetry(
+  token: string,
+  messageId: string,
+  options: { maxRetries?: number; initialBackoffMs?: number } = {}
+): Promise<any> {
+  const maxRetries = options.maxRetries ?? 3;
+  const initialBackoffMs = options.initialBackoffMs ?? 300;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${messageId}?format=full`, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(10_000),
+      });
+
+      if (res.status === 404 || res.status === 410) {
+        throw new PermanentMessageInaccessibleError(messageId, res.status);
+      }
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        if (res.status >= 500 || res.status === 429) {
+          if (attempt < maxRetries) {
+            const delay = initialBackoffMs * Math.pow(2, attempt - 1);
+            await new Promise((r) => setTimeout(r, delay));
+            continue;
+          }
+        }
+        throw new TransientMessageFetchError(messageId, `HTTP ${res.status}: ${text}`, res.status);
+      }
+
+      return await res.json();
+    } catch (err: any) {
+      if (err instanceof PermanentMessageInaccessibleError) {
+        throw err;
+      }
+      if (attempt < maxRetries && (err?.name === "TimeoutError" || err?.message?.includes("fetch failed"))) {
+        const delay = initialBackoffMs * Math.pow(2, attempt - 1);
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+      if (attempt >= maxRetries) {
+        throw new TransientMessageFetchError(messageId, err?.message || String(err));
+      }
+    }
+  }
 }
 
 /**

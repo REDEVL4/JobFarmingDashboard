@@ -37,6 +37,11 @@ export function resolveScanWindow(params: {
     completed_at?: string;
     verification_results?: any;
   } | null;
+  cursorRecord?: {
+    last_history_id?: string | null;
+    last_success_at?: string | null;
+    last_observed_at?: string | null;
+  } | null;
   gapReconcile?: boolean;
   lastVerifiedCheckpoint: string;
   overlapMinutes: number;
@@ -46,6 +51,7 @@ export function resolveScanWindow(params: {
 }): ScanWindow {
   const {
     latestProductionLog,
+    cursorRecord,
     gapReconcile,
     lastVerifiedCheckpoint,
     overlapMinutes,
@@ -104,9 +110,11 @@ export function resolveScanWindow(params: {
     };
   }
 
-  // 4. Standard poll from latest completed checkpoint
+  // 4. Standard poll from dedicated ingestion cursor or latest completed checkpoint
   let baseTimestamp = lastVerifiedCheckpoint;
-  if (
+  if (cursorRecord?.last_success_at) {
+    baseTimestamp = cursorRecord.last_success_at;
+  } else if (
     latestProductionLog?.completed_at &&
     vResults.status === "completed" &&
     !vResults.dry_run &&
@@ -116,13 +124,15 @@ export function resolveScanWindow(params: {
     baseTimestamp = latestProductionLog.completed_at;
   }
 
+  const effectiveHistoryId = bodyStartHistoryId || cursorRecord?.last_history_id || latestHistoryId;
+
   const lastScanMs = new Date(baseTimestamp).getTime() - overlapMinutes * 60_000;
   return {
     queryAfterEpoch: Math.floor(lastScanMs / 1000),
     queryBeforeEpoch: null,
     isResumingBackfill: false,
     continuationCeilingTime: null,
-    startHistoryId: latestHistoryId,
+    startHistoryId: effectiveHistoryId,
   };
 }
 
