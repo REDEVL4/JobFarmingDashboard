@@ -80,6 +80,19 @@ REVOKE ALL ON jobbot.gmail_processing_queue FROM anon;
 GRANT SELECT, INSERT, UPDATE, DELETE ON jobbot.gmail_processing_queue TO authenticated;
 GRANT ALL ON jobbot.gmail_processing_queue TO service_role;
 
+-- Widen monitor_sources check constraint to permit gmail_status_ingestion
+ALTER TABLE jobbot.monitor_sources 
+    DROP CONSTRAINT IF EXISTS monitor_sources_source_key_check;
+
+ALTER TABLE jobbot.monitor_sources 
+    ADD CONSTRAINT monitor_sources_source_key_check 
+    CHECK (source_key IN (
+        'gmail_linkedin_notifications',
+        'manual_import',
+        'linkedin_official_messaging',
+        'gmail_status_ingestion'
+    ));
+
 -- Register monitor source for ingestion tracking in sync_cursors
 INSERT INTO jobbot.monitor_sources (
     source_key,
