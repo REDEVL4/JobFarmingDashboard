@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import {
+  checkSensitiveMessage,
+  sanitizeText,
+} from "../../supabase/functions/jf-grok-owner-mcp/sensitive-filter.ts";
 
 const DESIGNATED_OWNER_UUID = "f2729195-5445-4272-ab85-cac5b03b0967";
 const ACTIVE_GROK_CLIENT_ID = "16bdb57f-c2cd-40d8-b6e1-c1a1b17e3f32";
@@ -22,6 +26,21 @@ const VALID_CLASSIFICATIONS = new Set([
   "recruiter_follow_up",
   "offer",
   "other_uncertain",
+]);
+
+const ALLOWED_QUEUE_REVIEW_STATUSES = new Set([
+  "pending",
+  "requires_review",
+  "auto_approved",
+  "user_approved",
+  "user_rejected",
+  "ignored",
+]);
+
+const ALLOWED_REVIEW_ITEM_STATES = new Set([
+  "open",
+  "resolved",
+  "ignored",
 ]);
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -166,10 +185,11 @@ test("Grok Intelligence Invariants: proposals never mutate job_applications.appl
     evidence_summary: "Thank you for your interest, but we have decided to move forward with other candidates.",
   };
 
-  // State recorded in recruitment_review_items (not modifying applicationRecord)
+  // State recorded in recruitment_review_items using DB-compatible state 'open'
   const reviewQueueItem = {
     id: "review-9999",
     message_id: "msg-001",
+    thread_id: "thread-001",
     reason_code: proposal.classification,
     proposed_stage: "Rejected",
     candidate_applications: {
@@ -178,13 +198,73 @@ test("Grok Intelligence Invariants: proposals never mutate job_applications.appl
       confidence: proposal.confidence,
     },
     evidence_summary: proposal.evidence_summary,
-    state: "pending_owner_review",
+    state: "open",
+  };
+
+  const queueRecord = {
+    id: proposal.queue_id,
+    review_status: "requires_review",
   };
 
   // Assert application status remains unchanged!
   assert.equal(applicationRecord.application_status, "Applied");
-  assert.equal(reviewQueueItem.state, "pending_owner_review");
+  assert.equal(reviewQueueItem.state, "open");
+  assert.ok(ALLOWED_REVIEW_ITEM_STATES.has(reviewQueueItem.state));
+  assert.equal(queueRecord.review_status, "requires_review");
+  assert.ok(ALLOWED_QUEUE_REVIEW_STATUSES.has(queueRecord.review_status));
   assert.equal(reviewQueueItem.candidate_applications.current_status, "Applied");
+});
+
+test("Grok Intelligence Invariants: DB check constraint alignment", () => {
+  // Ensure we never emit incompatible review_status or item states
+  assert.ok(ALLOWED_QUEUE_REVIEW_STATUSES.has("requires_review"));
+  assert.ok(!ALLOWED_QUEUE_REVIEW_STATUSES.has("pending_review"));
+
+  assert.ok(ALLOWED_REVIEW_ITEM_STATES.has("open"));
+  assert.ok(!ALLOWED_REVIEW_ITEM_STATES.has("pending_owner_review"));
+});
+
+test("Grok Intelligence Sensitive Filter: catches OTP and security alerts", () => {
+  const sensitiveSamples = [
+    { subject: "Your Google verification code is 849201", from: "no-reply@accounts.google.com" },
+    { subject: "Reset your password", from: "support@example.com" },
+    { subject: "New sign-in from Chrome on Windows", from: "security@github.com" },
+    { subject: "Security Alert: Unusual sign-in activity detected", from: "accountprotection.google.com" },
+    { subject: "Your single-use login code", from: "auth@company.com" },
+    { subject: "Two-step verification pin", from: "noreply@bank.com" },
+  ];
+
+  for (const sample of sensitiveSamples) {
+    const res = checkSensitiveMessage(sample);
+    assert.equal(res.isSensitive, true, `Should mark as sensitive: ${sample.subject}`);
+    assert.ok(res.reason, "Should provide exclusion reason");
+  }
+
+  const normalRecruitmentSamples = [
+    { subject: "Thank you for applying to Senior Engineer at Acme Corp", from: "jobs-noreply@greenhouse.io" },
+    { subject: "Interview Invitation: Systems Architect - Google", from: "recruiter@google.com" },
+    { subject: "Update on your application with Stripe", from: "talent@stripe.com" },
+    { subject: "Coding Assessment Invitation - HackerRank", from: "support@hackerrank.com" },
+    { subject: "Offer of Employment: Lead AI Engineer", from: "hr@innovate.ai" },
+  ];
+
+  for (const sample of normalRecruitmentSamples) {
+    const res = checkSensitiveMessage(sample);
+    assert.equal(res.isSensitive, false, `Should NOT mark as sensitive: ${sample.subject}`);
+  }
+});
+
+test("Grok Intelligence Sensitive Filter: text sanitizer strips codes and HTML", () => {
+  const htmlWithCode = "<p>Your security confirmation code is <strong>492819</strong>. Do not share.</p>";
+  const sanitized = sanitizeText(htmlWithCode);
+  assert.ok(!sanitized.includes("<p>"), "HTML tags stripped");
+  assert.ok(!sanitized.includes("492819"), "Digits redacted");
+  assert.ok(sanitized.includes("[REDACTED]"), "Redaction marker inserted");
+
+  const longText = "A".repeat(3000);
+  const truncated = sanitizeText(longText, 500);
+  assert.equal(truncated.length, 500 + "... [truncated]".length);
+  assert.ok(truncated.endsWith("... [truncated]"));
 });
 
 test("Grok Intelligence MCP Edge Function File Audit", () => {
@@ -198,4 +278,16 @@ test("Grok Intelligence MCP Edge Function File Audit", () => {
   assert.ok(!code.includes("claim_work"), "Does not register legacy claim_work");
   assert.ok(!code.includes("complete_work"), "Does not register legacy complete_work");
 });
+
+test("Grok Intelligence Migration File Audit: Schema Compatibility", () => {
+  const sql = fs.readFileSync("supabase/migrations/20261109210000_create_recruitment_intelligence_rpcs.sql", "utf8");
+  assert.ok(sql.includes("'requires_review'"), "Sets review_status to 'requires_review'");
+  assert.ok(!sql.includes("'pending_review'"), "Does NOT use obsolete 'pending_review'");
+  assert.ok(sql.includes("'open'"), "Sets review item state to 'open'");
+  assert.ok(!sql.includes("'pending_owner_review'"), "Does NOT use obsolete 'pending_owner_review'");
+  assert.ok(sql.includes("coalesce(q.thread_id, q.message_id)"), "Coalesces thread_id for NOT NULL constraint");
+  assert.ok(sql.includes("get_gmail_fetch_credentials"), "Exposes internal Gmail credential accessor");
+  assert.ok(!sql.includes("UPDATE public.job_applications"), "Zero writes to job_applications");
+});
+
 

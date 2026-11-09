@@ -6,6 +6,7 @@ import { z } from 'npm:zod@4.3.6';
 
 import { recordTransportError } from './transport-diagnostic.mjs';
 import { recordToolList } from './discovery.mjs';
+import { fetchAndSanitizeQueuedEmail } from './gmail-fetcher.ts';
 
 const DIAGNOSTIC_UNTIL = Date.parse('2026-11-08T22:57:09.877Z');
 
@@ -102,23 +103,43 @@ const handler = pipeline(
         },
       );
 
-      // Tool 3: Get sanitized recruitment email details by queue ID
+      // Tool 3: Get sanitized recruitment email details with on-demand Gmail fetch
       server.registerTool(
         'get_recruitment_email_details',
         {
           title: 'Get recruitment email details',
-          description: 'Retrieves sanitized metadata for an email by its queue ID.',
+          description: 'Validates queue ownership and fetches sanitized message content on-demand from Gmail using server-side credentials.',
           inputSchema: z.object({
             queue_id: z.string().uuid(),
           }),
           annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
         },
         async ({ queue_id }) => {
-          const { data, error } = await ctx.supabase.rpc('jf_grok_get_email_details', {
+          // 1. Validate queue record existence and ownership via RPC
+          const { data: queueRec, error: queueError } = await ctx.supabase.rpc('jf_grok_get_email_details', {
             p_queue_id: queue_id,
           });
-          if (error) throw new Error(`Failed to retrieve email details: ${error.message}`);
-          return { content: [{ type: 'text', text: JSON.stringify(data) }] };
+          if (queueError || !queueRec) {
+            throw new Error(`Queue record not found or inaccessible: ${queueError?.message || 'Not found'}`);
+          }
+
+          // 2. Fetch and sanitize message on-demand using server-side OAuth credentials
+          try {
+            const sanitized = await fetchAndSanitizeQueuedEmail(ctx.supabase, queueRec);
+            return { content: [{ type: 'text', text: JSON.stringify(sanitized) }] };
+          } catch (fetchErr: any) {
+            // Fallback gracefully to queue record metadata if external Gmail API fails temporarily
+            return {
+              content: [{
+                type: 'text',
+                text: JSON.stringify({
+                  ...queueRec,
+                  fetch_status: 'fetch_failed',
+                  fetch_error: fetchErr?.message || String(fetchErr),
+                }),
+              }],
+            };
+          }
         },
       );
 
