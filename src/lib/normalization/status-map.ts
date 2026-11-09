@@ -6,12 +6,18 @@ import type { NormalizedStatus } from "@/types/dashboard";
  * Strips formatting, handles case-insensitivity, Turkish characters, and aliases.
  * Preserves original raw status if unmapped without coercing.
  */
-export function normalizeStatus(rawStatus: string | null | undefined): {
+export function normalizeStatus(
+  rawStatus: string | null | undefined,
+  hiringStage?: string | null | undefined
+): {
   normalized: NormalizedStatus;
   canonicalLabel: string;
   isUnmapped: boolean;
 } {
-  if (!rawStatus || !rawStatus.trim()) {
+  // If hiring stage indicates advanced progression or terminal state, prioritize it
+  const effectiveRaw = (hiringStage && hiringStage.trim()) ? hiringStage : rawStatus;
+
+  if (!effectiveRaw || !effectiveRaw.trim()) {
     return {
       normalized: "unmapped",
       canonicalLabel: "Unspecified",
@@ -170,3 +176,4 @@ export function getStatusBadgeStyle(status: NormalizedStatus | "unmapped"): {
       };
   }
 }
+

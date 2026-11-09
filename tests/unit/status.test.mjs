@@ -65,3 +65,4 @@ test("Status Normalization: handles markdown and emojis gracefully", () => {
   assert.equal(normalizeStatus("Interview ✅").normalized, "interviewing");
   assert.equal(normalizeStatus("SKIP ❌").normalized, "withdrawn");
 });
+

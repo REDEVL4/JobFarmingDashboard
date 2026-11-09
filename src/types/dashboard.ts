@@ -134,3 +134,4 @@ export interface OutreachStats {
   inConversationCount: number;
   contacts: DbOutreachContact[];
 }
+

@@ -22,3 +22,4 @@ test.describe("OAuth 2.1 Consent Protocol", () => {
     await expect(denyBtn).toBeVisible();
   });
 });
+

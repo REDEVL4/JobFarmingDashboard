@@ -30,3 +30,4 @@ test.describe("Applications Management & Filtering", () => {
     await expect(page.getByText("Chronological Activity Timeline")).not.toBeVisible();
   });
 });
+

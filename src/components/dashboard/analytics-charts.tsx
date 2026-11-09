@@ -299,3 +299,4 @@ export function AnalyticsCharts({ metrics }: AnalyticsChartsProps) {
     </div>
   );
 }
+

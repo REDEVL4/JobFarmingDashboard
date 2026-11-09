@@ -105,3 +105,4 @@ export function KpiCard({
 
   return content;
 }
+

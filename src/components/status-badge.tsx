@@ -51,3 +51,4 @@ export function StatusBadge({ status, size = "default", showDot = true, classNam
     </span>
   );
 }
+

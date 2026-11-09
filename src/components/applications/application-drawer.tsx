@@ -202,3 +202,4 @@ export function ApplicationDrawer({ application, onClose }: ApplicationDrawerPro
     </div>
   );
 }
+

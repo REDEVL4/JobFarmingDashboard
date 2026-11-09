@@ -54,3 +54,4 @@ test("OAuth: filters out unrecognized custom scopes for security", () => {
   assert.deepEqual(result.scopes, ["openid"]);
   assert.deepEqual(result.unrecognized, ["superadmin", "root_access"]);
 });
+

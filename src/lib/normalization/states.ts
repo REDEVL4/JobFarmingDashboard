@@ -88,3 +88,4 @@ export const CANONICAL_STATES: StatusDefinition[] = [
     isTerminal: true,
   },
 ];
+

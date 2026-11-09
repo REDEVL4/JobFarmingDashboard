@@ -104,3 +104,4 @@ export function KpiGrid({ metrics }: KpiGridProps) {
     </div>
   );
 }
+

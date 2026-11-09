@@ -24,3 +24,4 @@ test.describe("Executive Dashboard", () => {
     await expect(page).toHaveURL(/.*applications\?status=interviewing/);
   });
 });
+

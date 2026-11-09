@@ -652,3 +652,4 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
     </div>
   );
 }
+
