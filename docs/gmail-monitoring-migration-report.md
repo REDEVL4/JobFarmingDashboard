@@ -128,22 +128,23 @@ select cron.schedule(
 ```
 > node --experimental-strip-types --test "tests/unit/**/*.test.mjs"
 
-ℹ tests 51
+ℹ tests 65
 ℹ suites 0
-ℹ pass 51
+ℹ pass 65
 ℹ fail 0
 ℹ cancelled 0
 ℹ skipped 0
-ℹ duration_ms 132.9
+ℹ duration_ms 148.1
 ```
 
 - **Auth Security Tests (4/4 passed)**: Fail-closed verification, wrong-owner rejection, missing credential handling.
 - **Gmail Classifier Tests (16/16 passed)**: Rejections (Teleport, Barclays), assessments (IBM coding & competency), interviews (Datadog), formal offers (Stripe), acknowledgments (Uber), 2FA/security discard, prompt injection immunity.
-- **Gmail Matcher Tests (11/11 passed)**: Requisition ID matching, confirmation thread reference matching, ambiguous multi-role detection (Affirm), unverified third-party domain flagging (Gem), deduplication set verification.
+- **Gmail Matcher Tests (12/12 passed)**: Requisition ID matching, confirmation thread reference matching, single company hardening (requires role confirmation), unverified third-party domain flagging (Gem), deduplication set verification.
+- **Hardening Invariants (7/7 passed)**: Live write gate (`ENABLE_GMAIL_STATUS_WRITES`), dry-run checkpoint invariant, incomplete pagination protection, terminal stage overwrite protection, chronological event sorting.
 - **Sync Idempotency Tests (4/4 passed)**: Historical message deduplication, 15-minute lookback window, dry-run invariant.
 - **Grok Read-Only Tests (4/4 passed)**: Strict HTTP GET enforcement, bearer authentication, credential leakage prevention.
-- **Metrics & Status Normalization (12/12 passed)**: UTC date safety, real-data calculations, canonical status mapping.
-- **Next.js Production Build**: Passed with 0 errors (`next build` compiled 10 routes).
+- **Metrics & Status Normalization (18/18 passed)**: UTC date safety, real-data calculations, canonical status mapping.
+- **Next.js Production Build**: Passed with 0 errors (`next build` compiled 10 routes cleanly).
 
 ---
 

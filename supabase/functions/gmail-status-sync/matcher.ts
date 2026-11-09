@@ -116,19 +116,7 @@ export function matchApplicationToEmail(
     };
   }
 
-  // If exactly one application exists for this company
-  if (matchingCompanies.length === 1) {
-    const singleApp = matchingCompanies[0];
-    return {
-      matched: true,
-      ambiguous: false,
-      confidence: 0.88,
-      matchedApplication: singleApp,
-      matchBasis: `Unique application found for company ${singleApp.company}`,
-    };
-  }
-
-  // If multiple applications exist at the same company, attempt exact job title matching
+  // Check for specific job title matches among candidate companies
   const exactTitleMatches = matchingCompanies.filter((app) => {
     if (!app.job_title) return false;
     const titleRegex = new RegExp(`\\b${app.job_title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
@@ -141,7 +129,23 @@ export function matchApplicationToEmail(
       ambiguous: false,
       confidence: 0.9,
       matchedApplication: exactTitleMatches[0],
-      matchBasis: `Specific role title matches one of multiple applications at ${exactTitleMatches[0].company}`,
+      matchBasis: `Specific role title "${exactTitleMatches[0].job_title}" verified for company ${exactTitleMatches[0].company}`,
+    };
+  }
+
+  // HARDENING POLICY:
+  // Never automatically update an application status merely because it is the only application at a company.
+  // Emails that mention a company without requisition ID, thread reference, or role title
+  // must be queued for human review.
+  if (matchingCompanies.length === 1) {
+    const singleApp = matchingCompanies[0];
+    return {
+      matched: false,
+      ambiguous: true,
+      confidence: 0.6,
+      candidateApplications: [singleApp],
+      reasonCode: "role_less_specific_than_application",
+      matchBasis: `Company ${singleApp.company} recognized, but correspondence lacks requisition ID, thread reference, or job title confirmation. Queued for human verification.`,
     };
   }
 
@@ -149,10 +153,10 @@ export function matchApplicationToEmail(
   return {
     matched: false,
     ambiguous: true,
-    confidence: 0.6,
+    confidence: 0.5,
     candidateApplications: matchingCompanies,
     reasonCode: "multiple_candidate_applications",
-    matchBasis: `Multiple active applications for ${matchingCompanies[0].company} (${matchingCompanies.length} roles). Email does not specify unique requisition.`,
+    matchBasis: `Multiple active applications for ${matchingCompanies[0].company} (${matchingCompanies.length} roles). Email does not specify unique requisition or title.`,
   };
 }
 

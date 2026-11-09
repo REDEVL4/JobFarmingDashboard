@@ -93,21 +93,58 @@ test("Gmail Matcher: Confirmation Email Ref / Thread ID Matching", async (t) => 
   });
 });
 
-test("Gmail Matcher: Ambiguous Multi-Role Resolution", async (t) => {
-  await t.test("flags ambiguous match when user applied to multiple roles at Affirm", () => {
-    const email = {
-      id: "1a17d42f748ff23a",
-      threadId: "1a17d42f748ff23a",
-      from: "recruiting@affirm.com",
-      subject: "Your application with Affirm",
-      bodyText: "We have reviewed your application for Software Engineer at Affirm.",
+test("Gmail Matcher: Single Company Application Hardening", async (t) => {
+  await t.test("does NOT auto-match single application when email lacks role or requisition details", () => {
+    // Only 1 application for "Datadog"
+    const datadogApps = [
+      {
+        id: "datadog-uuid-1234",
+        company: "Datadog",
+        job_title: "Senior Reliability Engineer",
+        requisition_id: "DD-9988",
+        confirmation_email_ref: null,
+        hiring_stage: null,
+      },
+    ];
+
+    const vagueEmail = {
+      id: "vague_msg_1",
+      threadId: "vague_thread_1",
+      from: "newsletter@datadog.com",
+      subject: "Updates from Datadog",
+      bodyText: "Thanks for checking in with Datadog. Check out our open roles.",
     };
 
-    const res = matchApplicationToEmail(email, SAMPLE_APPLICATIONS);
+    const res = matchApplicationToEmail(vagueEmail, datadogApps);
     assert.equal(res.matched, false);
     assert.equal(res.ambiguous, true);
-    assert.equal(res.candidateApplications?.length, 2);
-    assert.ok(res.reasonCode === "multiple_candidate_applications" || res.reasonCode === "role_less_specific_than_application");
+    assert.equal(res.reasonCode, "role_less_specific_than_application");
+  });
+
+  await t.test("matches single application when job title is explicitly corroborated", () => {
+    const datadogApps = [
+      {
+        id: "datadog-uuid-1234",
+        company: "Datadog",
+        job_title: "Senior Reliability Engineer",
+        requisition_id: "DD-9988",
+        confirmation_email_ref: null,
+        hiring_stage: null,
+      },
+    ];
+
+    const specificEmail = {
+      id: "specific_msg_1",
+      threadId: "specific_thread_1",
+      from: "recruiter@datadog.com",
+      subject: "Your application for Senior Reliability Engineer at Datadog",
+      bodyText: "Regarding your candidacy for Senior Reliability Engineer.",
+    };
+
+    const res = matchApplicationToEmail(specificEmail, datadogApps);
+    assert.equal(res.matched, true);
+    assert.equal(res.ambiguous, false);
+    assert.equal(res.matchedApplication?.id, "datadog-uuid-1234");
   });
 });
 

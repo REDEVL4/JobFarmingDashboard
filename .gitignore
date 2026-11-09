@@ -19,7 +19,9 @@
 # Production
 /build
 
-# Misc
+# Supabase
+.temp/
+supabase/.temp/
 .DS_Store
 *.pem
 

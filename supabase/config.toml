@@ -1,0 +1,5 @@
+# Supabase Project Configuration
+# Scoped configuration for Edge Functions
+
+[functions.gmail-status-sync]
+verify_jwt = false

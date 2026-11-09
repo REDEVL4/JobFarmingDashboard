@@ -62,32 +62,47 @@ This guide provides instructions to authorize the Supabase Edge Function (`gmail
 
 Execute the following SQL in your Supabase SQL Editor (or via Supabase CLI / MCP) to securely store your credentials in Supabase Vault:
 
+> [!NOTE]
+> **Existing Secrets Verified**: The four required secrets (`jf_gmail_client_id`, `jf_gmail_client_secret`, `jf_gmail_refresh_token`, and `jf_monitor_invoke_token`) already exist in your Supabase Vault. **Do not re-insert or overwrite them** unless you are deliberately rotating OAuth credentials.
+
+If rotating credentials in the future, use the supported Supabase Vault API functions (`vault.create_secret` / `vault.update_secret`) rather than direct table insertion with `ON CONFLICT` (since `vault.secrets` does not have a unique constraint on `name`):
+
 ```sql
--- 1. Insert or update Gmail Client ID
-insert into vault.secrets (name, secret, description)
-values ('jf_gmail_client_id', 'YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com', 'Gmail OAuth client id (gmail.readonly)')
-on conflict (name) do update
-set secret = excluded.secret,
-    updated_at = now();
+-- Supported Supabase Vault update-or-create procedure:
+do $$
+declare
+  v_secret_id uuid;
+begin
+  -- 1. Gmail Client ID
+  select id into v_secret_id from vault.secrets where name = 'jf_gmail_client_id' limit 1;
+  if v_secret_id is not null then
+    perform vault.update_secret(v_secret_id, 'YOUR_CLIENT_ID.apps.googleusercontent.com', 'jf_gmail_client_id', 'Gmail OAuth client id (gmail.readonly)');
+  else
+    perform vault.create_secret('YOUR_CLIENT_ID.apps.googleusercontent.com', 'jf_gmail_client_id', 'Gmail OAuth client id (gmail.readonly)');
+  end if;
 
--- 2. Insert or update Gmail Client Secret
-insert into vault.secrets (name, secret, description)
-values ('jf_gmail_client_secret', 'YOUR_GOOGLE_CLIENT_SECRET', 'Gmail OAuth client secret')
-on conflict (name) do update
-set secret = excluded.secret,
-    updated_at = now();
+  -- 2. Gmail Client Secret
+  select id into v_secret_id from vault.secrets where name = 'jf_gmail_client_secret' limit 1;
+  if v_secret_id is not null then
+    perform vault.update_secret(v_secret_id, 'YOUR_CLIENT_SECRET', 'jf_gmail_client_secret', 'Gmail OAuth client secret');
+  else
+    perform vault.create_secret('YOUR_CLIENT_SECRET', 'jf_gmail_client_secret', 'Gmail OAuth client secret');
+  end if;
 
--- 3. Insert or update Gmail Refresh Token
-insert into vault.secrets (name, secret, description)
-values ('jf_gmail_refresh_token', 'YOUR_GOOGLE_REFRESH_TOKEN', 'Gmail OAuth refresh token (gmail.readonly)')
-on conflict (name) do update
-set secret = excluded.secret,
-    updated_at = now();
+  -- 3. Gmail Refresh Token
+  select id into v_secret_id from vault.secrets where name = 'jf_gmail_refresh_token' limit 1;
+  if v_secret_id is not null then
+    perform vault.update_secret(v_secret_id, 'YOUR_REFRESH_TOKEN', 'jf_gmail_refresh_token', 'Gmail OAuth refresh token (gmail.readonly)');
+  else
+    perform vault.create_secret('YOUR_REFRESH_TOKEN', 'jf_gmail_refresh_token', 'Gmail OAuth refresh token (gmail.readonly)');
+  end if;
 
--- 4. Ensure internal invoke token exists
-insert into vault.secrets (name, secret, description)
-values ('jf_monitor_invoke_token', encode(gen_random_bytes(32), 'hex'), 'Shared secret: pg_cron tick -> gmail-status-sync edge function')
-on conflict (name) do nothing;
+  -- 4. Internal Invoke Token (if not present)
+  select id into v_secret_id from vault.secrets where name = 'jf_monitor_invoke_token' limit 1;
+  if v_secret_id is null then
+    perform vault.create_secret(encode(gen_random_bytes(32), 'hex'), 'jf_monitor_invoke_token', 'Shared secret: pg_cron tick -> gmail-status-sync edge function');
+  end if;
+end $$;
 ```
 
 ---
