@@ -7,13 +7,14 @@ import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter }
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { createClient } from "@/lib/supabase/client";
-
-const DESIGNATED_OWNER_UUID = "f2729195-5445-4272-ab85-cac5b03b0967";
+import { DESIGNATED_OWNER_UUID, validateSafeRedirect } from "@/lib/oauth-validation";
 
 function LoginContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const errorCode = searchParams.get("error");
+  const redirectParam = searchParams.get("redirect") || searchParams.get("returnTo");
+  const isOAuthRedirect = Boolean(redirectParam && redirectParam.includes("/oauth/consent"));
 
   const [email, setEmail] = useState("govardhanreddy.vys7@gmail.com");
   const [password, setPassword] = useState("");
@@ -50,8 +51,10 @@ function LoginContent() {
         return;
       }
 
-      // Authenticated owner confirmed
-      router.push("/");
+      // Authenticated owner confirmed - preserve destination (e.g. OAuth consent)
+      const redirectParam = searchParams.get("redirect") || searchParams.get("returnTo");
+      const destination = validateSafeRedirect(redirectParam, "/");
+      router.push(destination);
       router.refresh();
     } catch (err: any) {
       // Fail-closed: Always stay on login page on any exception
@@ -83,6 +86,15 @@ function LoginContent() {
 
         <form onSubmit={handleSignIn}>
           <CardContent className="space-y-4 text-xs">
+            {isOAuthRedirect && (
+              <div className="p-3 rounded-lg border border-brand-500/30 bg-brand-500/10 text-brand-700 dark:text-brand-300 flex items-start gap-2">
+                <Lock className="h-4 w-4 shrink-0 mt-0.5 text-brand-600 dark:text-brand-400" />
+                <span>
+                  <strong>OAuth 2.1 Consent:</strong> Authenticate as the designated owner to review and authorize the requesting application.
+                </span>
+              </div>
+            )}
+
             {errorCode === "unauthorized_owner" && (
               <div className="p-3 rounded-lg border border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-400 flex items-start gap-2">
                 <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
