@@ -135,3 +135,16 @@ export interface OutreachStats {
   contacts: DbOutreachContact[];
 }
 
+export type DataFetchStatus =
+  | "success"
+  | "empty"
+  | "unauthenticated"
+  | "permission_denied"
+  | "connection_error";
+
+export interface DataResult<T> {
+  data: T;
+  status: DataFetchStatus;
+  error: string | null;
+}
+

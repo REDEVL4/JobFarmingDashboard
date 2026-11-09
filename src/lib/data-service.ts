@@ -1,44 +1,94 @@
-import { createClient } from "./supabase/client";
+import { getAuthenticatedOwner } from "./supabase/server";
 import { normalizeStatus } from "./normalization/status-map";
-import type { ApplicationViewItem, DashboardMetrics, GmailMonitoringStats, OutreachStats } from "@/types/dashboard";
-import type { DbJobApplication, DbJobOpportunity, DbRecruitmentReviewItem, DbOutreachContact, DbSyncLog } from "@/types/database";
+import type {
+  ApplicationViewItem,
+  DashboardMetrics,
+  GmailMonitoringStats,
+  OutreachStats,
+  DataResult,
+} from "@/types/dashboard";
+import type {
+  DbJobApplication,
+  DbJobOpportunity,
+  DbRecruitmentReviewItem,
+  DbOutreachContact,
+  DbSyncLog,
+} from "@/types/database";
 
 /**
- * High-performance Data Service.
- * Connects directly to the live Supabase `jobbot` schema.
- * STRICT POLICY: No fake records, no hardcoded trends, no fallback mock objects.
- * When unauthenticated or query fails, returns empty/unavailable states.
+ * Server-Side Data Service.
+ * STRICT POLICY:
+ * 1. Uses authenticated server-side Supabase client with active owner session.
+ * 2. Distinguishes: success, empty, unauthenticated, permission_denied, connection_error.
+ * 3. Never falls back to mock records or fake application counts.
+ * 4. Never displays zero applications when the actual problem is a failed query.
  */
 
-export async function fetchApplications(): Promise<ApplicationViewItem[]> {
+export async function fetchApplications(): Promise<DataResult<ApplicationViewItem[]>> {
   try {
-    const supabase = createClient();
+    const auth = await getAuthenticatedOwner();
 
-    // Query jobbot.job_applications joined with jobbot.job_opportunities
-    const { data, error } = await supabase
+    if (!auth.success) {
+      if (auth.reason === "unauthenticated") {
+        return {
+          data: [],
+          status: "unauthenticated",
+          error: "Authentication required: Please sign in as the designated owner to access Job Farming data.",
+        };
+      }
+      if (auth.reason === "unauthorized_owner") {
+        return {
+          data: [],
+          status: "permission_denied",
+          error: auth.error,
+        };
+      }
+      return {
+        data: [],
+        status: "connection_error",
+        error: auth.error,
+      };
+    }
+
+    // Execute authenticated query with owner session RLS
+    const { data, error } = await auth.client
       .from("job_applications")
       .select("*, job_opportunities(*)")
       .order("created_at", { ascending: false });
 
     if (error) {
       console.error("Supabase query error for job_applications:", error.message);
-      return [];
+      const isPermission =
+        error.code === "42501" ||
+        error.message.toLowerCase().includes("permission") ||
+        error.message.toLowerCase().includes("policy") ||
+        error.message.toLowerCase().includes("rls");
+
+      return {
+        data: [],
+        status: isPermission ? "permission_denied" : "connection_error",
+        error: `Database query failed: ${error.message} (${error.code || "UNKNOWN"})`,
+      };
     }
 
     if (!data || data.length === 0) {
-      return [];
+      return {
+        data: [],
+        status: "empty",
+        error: null,
+      };
     }
 
-    return (data as (DbJobApplication & { job_opportunities?: DbJobOpportunity })[]).map((item) => {
+    const applications: ApplicationViewItem[] = (
+      data as (DbJobApplication & { job_opportunities?: DbJobOpportunity })[]
+    ).map((item) => {
       const rawStatus = item.application_status || item.status || "Applied";
       const hiringStage = item.hiring_stage;
       const { normalized } = normalizeStatus(rawStatus, hiringStage);
       const opp = item.job_opportunities;
 
-      // Real salary text from opportunity
       const salaryText = opp?.salary_text || "Not disclosed";
 
-      // Determine remote type
       let remoteType: "Remote" | "Hybrid" | "Onsite" = "Hybrid";
       if (opp?.work_mode) {
         const wm = opp.work_mode.toLowerCase();
@@ -47,7 +97,6 @@ export async function fetchApplications(): Promise<ApplicationViewItem[]> {
         else remoteType = "Hybrid";
       }
 
-      // Parse employment type
       let employmentType = "Full-Time";
       if (opp?.employment_type) {
         const et = opp.employment_type.toLowerCase();
@@ -68,30 +117,49 @@ export async function fetchApplications(): Promise<ApplicationViewItem[]> {
         lastUpdatedDate: item.updated_at || item.created_at,
         rawStatus: hiringStage ? `${rawStatus} (${hiringStage})` : rawStatus,
         normalizedStatus: normalized,
-        score: typeof opp?.fit_score === "number" ? opp.fit_score : opp?.fit_score ? parseFloat(String(opp.fit_score)) : null,
+        score:
+          typeof opp?.fit_score === "number"
+            ? opp.fit_score
+            : opp?.fit_score
+            ? parseFloat(String(opp.fit_score))
+            : null,
         salaryText,
         source: opp?.discovery_source || "Online",
         recruiterContacted: Boolean(item.confirmation_email_ref),
         interviewScheduled: normalized === "interviewing",
-        requiresFollowUp: item.application_status === "Submission Pending" || item.verification_status === "unverified",
+        requiresFollowUp:
+          item.application_status === "Submission Pending" ||
+          item.verification_status === "unverified",
         notes: item.notes || opp?.fit_explanation || "",
         timeline: [
           { status: rawStatus, timestamp: item.created_at, note: "Initial entry" },
-          ...(hiringStage ? [{ status: hiringStage, timestamp: item.updated_at, note: "Stage update" }] : []),
+          ...(hiringStage
+            ? [{ status: hiringStage, timestamp: item.updated_at, note: "Stage update" }]
+            : []),
         ],
         rawApplication: item,
         rawJob: opp,
       };
     });
+
+    return {
+      data: applications,
+      status: "success",
+      error: null,
+    };
   } catch (err: any) {
-    console.error("fetchApplications failed:", err?.message || err);
-    return [];
+    console.error("fetchApplications exception:", err?.message || err);
+    return {
+      data: [],
+      status: "connection_error",
+      error: `Service connection error: ${err?.message || "Failed to query database"}`,
+    };
   }
 }
 
 /**
  * Derives dashboard analytics strictly from real records.
- * Calculates dynamic weekly trends from application dates.
+ * Calculates dynamic weekly trends from application dates (UTC-safe).
  * Does not fabricate interview counts or trends.
  */
 export function computeMetrics(applications: ApplicationViewItem[]): DashboardMetrics {
@@ -107,7 +175,17 @@ export function computeMetrics(applications: ApplicationViewItem[]): DashboardMe
 
   const companyMap = new Map<string, number>();
   const categoryMap = new Map<string, number>();
-  const weeklyMap = new Map<string, { applied: number; responses: number; rejections: number; assessments: number; interviews: number; offers: number }>();
+  const weeklyMap = new Map<
+    string,
+    {
+      applied: number;
+      responses: number;
+      rejections: number;
+      assessments: number;
+      interviews: number;
+      offers: number;
+    }
+  >();
 
   applications.forEach((app) => {
     switch (app.normalizedStatus) {
@@ -160,10 +238,20 @@ export function computeMetrics(applications: ApplicationViewItem[]): DashboardMe
           const day = dt.getUTCDay();
           const diff = dt.getUTCDate() - day + (day === 0 ? -6 : 1);
           const monday = new Date(Date.UTC(y, m - 1, diff));
-          const weekKey = `${monday.getUTCFullYear()}-${String(monday.getUTCMonth() + 1).padStart(2, "0")}-${String(monday.getUTCDate()).padStart(2, "0")}`;
+          const weekKey = `${monday.getUTCFullYear()}-${String(monday.getUTCMonth() + 1).padStart(
+            2,
+            "0"
+          )}-${String(monday.getUTCDate()).padStart(2, "0")}`;
 
           if (!weeklyMap.has(weekKey)) {
-            weeklyMap.set(weekKey, { applied: 0, responses: 0, rejections: 0, assessments: 0, interviews: 0, offers: 0 });
+            weeklyMap.set(weekKey, {
+              applied: 0,
+              responses: 0,
+              rejections: 0,
+              assessments: 0,
+              interviews: 0,
+              offers: 0,
+            });
           }
 
           const bucket = weeklyMap.get(weekKey)!;
@@ -254,14 +342,46 @@ export function computeMetrics(applications: ApplicationViewItem[]): DashboardMe
  * Fetches real telemetry from `jobbot.sync_logs` and `jobbot.recruitment_review_items`.
  * Reflects verified hourly polling schedule.
  */
-export async function fetchMonitoringStats(): Promise<GmailMonitoringStats> {
+export async function fetchMonitoringStats(): Promise<DataResult<GmailMonitoringStats>> {
+  const emptyStats: GmailMonitoringStats = {
+    connectionStatus: "disconnected",
+    lastSyncAt: null,
+    nextScheduledSyncAt: null,
+    emailsEvaluatedCount: 0,
+    statusChangesConfirmedCount: 0,
+    needsReviewCount: 0,
+    failedSyncAttemptsCount: 0,
+    events: [],
+    reviewQueue: [],
+  };
+
   try {
-    const supabase = createClient();
+    const auth = await getAuthenticatedOwner();
+
+    if (!auth.success) {
+      return {
+        data: emptyStats,
+        status: auth.reason === "unauthenticated" ? "unauthenticated" : "permission_denied",
+        error: auth.error,
+      };
+    }
 
     const [syncRes, reviewRes] = await Promise.all([
-      supabase.from("sync_logs").select("*").order("started_at", { ascending: false }).limit(20),
-      supabase.from("recruitment_review_items").select("*").order("created_at", { ascending: false }).limit(50),
+      auth.client.from("sync_logs").select("*").order("started_at", { ascending: false }).limit(20),
+      auth.client
+        .from("recruitment_review_items")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(50),
     ]);
+
+    if (syncRes.error) {
+      return {
+        data: emptyStats,
+        status: "connection_error",
+        error: `Failed to load sync logs: ${syncRes.error.message}`,
+      };
+    }
 
     const syncLogs = (syncRes.data || []) as DbSyncLog[];
     const reviewItems = (reviewRes.data || []) as DbRecruitmentReviewItem[];
@@ -270,7 +390,8 @@ export async function fetchMonitoringStats(): Promise<GmailMonitoringStats> {
 
     // Real cumulative evaluations from sync_logs
     const totalScanned = syncLogs.reduce(
-      (acc, log) => acc + (log.created_count || 0) + (log.updated_count || 0) + (log.skipped_count || 0),
+      (acc, log) =>
+        acc + (log.created_count || 0) + (log.updated_count || 0) + (log.skipped_count || 0),
       0
     );
     const totalConfirmed = syncLogs.reduce((acc, log) => acc + (log.updated_count || 0), 0);
@@ -291,28 +412,28 @@ export async function fetchMonitoringStats(): Promise<GmailMonitoringStats> {
       : null;
 
     return {
-      connectionStatus: latestSync ? "connected" : "disconnected",
-      lastSyncAt: lastSyncTime || new Date().toISOString(),
-      nextScheduledSyncAt: nextSyncTime || new Date(Date.now() + 60 * 60 * 1000).toISOString(),
-      emailsEvaluatedCount: totalScanned,
-      statusChangesConfirmedCount: totalConfirmed,
-      needsReviewCount: reviewItems.filter((i) => i.state === "open").length,
-      failedSyncAttemptsCount: syncLogs.filter((l) => Array.isArray(l.errors) && l.errors.length > 0).length,
-      events: mappedEvents,
-      reviewQueue: mappedEvents.filter((e) => e.classification === "acknowledgement"),
+      data: {
+        connectionStatus: latestSync ? "connected" : "disconnected",
+        lastSyncAt: lastSyncTime,
+        nextScheduledSyncAt: nextSyncTime,
+        emailsEvaluatedCount: totalScanned,
+        statusChangesConfirmedCount: totalConfirmed,
+        needsReviewCount: reviewItems.filter((i) => i.state === "open").length,
+        failedSyncAttemptsCount: syncLogs.filter(
+          (l) => Array.isArray(l.errors) && l.errors.length > 0
+        ).length,
+        events: mappedEvents,
+        reviewQueue: mappedEvents.filter((e) => e.classification === "acknowledgement"),
+      },
+      status: "success",
+      error: null,
     };
   } catch (err: any) {
     console.error("fetchMonitoringStats failed:", err?.message || err);
     return {
-      connectionStatus: "disconnected",
-      lastSyncAt: new Date().toISOString(),
-      nextScheduledSyncAt: new Date().toISOString(),
-      emailsEvaluatedCount: 0,
-      statusChangesConfirmedCount: 0,
-      needsReviewCount: 0,
-      failedSyncAttemptsCount: 0,
-      events: [],
-      reviewQueue: [],
+      data: emptyStats,
+      status: "connection_error",
+      error: err?.message || "Failed to load monitoring stats",
     };
   }
 }
@@ -321,36 +442,53 @@ export async function fetchMonitoringStats(): Promise<GmailMonitoringStats> {
  * Fetches real outreach contacts from `jobbot.outreach_contacts`.
  * Does not fallback to mock objects.
  */
-export async function fetchOutreachStats(): Promise<OutreachStats> {
+export async function fetchOutreachStats(): Promise<DataResult<OutreachStats>> {
+  const emptyStats: OutreachStats = {
+    totalProspects: 0,
+    draftsPendingApproval: 0,
+    approvedCount: 0,
+    sentCount: 0,
+    connectedCount: 0,
+    inConversationCount: 0,
+    contacts: [],
+  };
+
   try {
-    const supabase = createClient();
-    const { data, error } = await supabase
+    const auth = await getAuthenticatedOwner();
+
+    if (!auth.success) {
+      return {
+        data: emptyStats,
+        status: auth.reason === "unauthenticated" ? "unauthenticated" : "permission_denied",
+        error: auth.error,
+      };
+    }
+
+    const { data, error } = await auth.client
       .from("outreach_contacts")
       .select("*")
       .order("created_at", { ascending: false });
 
     if (error) {
       console.error("Supabase query error for outreach_contacts:", error.message);
+      const isPermission =
+        error.code === "42501" ||
+        error.message.toLowerCase().includes("permission") ||
+        error.message.toLowerCase().includes("policy") ||
+        error.message.toLowerCase().includes("rls");
+
       return {
-        totalProspects: 0,
-        draftsPendingApproval: 0,
-        approvedCount: 0,
-        sentCount: 0,
-        connectedCount: 0,
-        inConversationCount: 0,
-        contacts: [],
+        data: emptyStats,
+        status: isPermission ? "permission_denied" : "connection_error",
+        error: `Database query failed: ${error.message}`,
       };
     }
 
     if (!data || data.length === 0) {
       return {
-        totalProspects: 0,
-        draftsPendingApproval: 0,
-        approvedCount: 0,
-        sentCount: 0,
-        connectedCount: 0,
-        inConversationCount: 0,
-        contacts: [],
+        data: emptyStats,
+        status: "empty",
+        error: null,
       };
     }
 
@@ -361,32 +499,36 @@ export async function fetchOutreachStats(): Promise<OutreachStats> {
       role: item.professional_title || item.role || "Recruiter",
       contact_type: item.category || item.contact_type || "recruiter",
       status: (item.connection_stage || item.status || "draft_pending_approval") as any,
-      score: typeof item.relevance_score === "number" ? item.relevance_score : item.score || 90,
+      score:
+        typeof item.relevance_score === "number" ? item.relevance_score : item.score || 90,
       linkedin_url: item.linkedin_url || "",
-      connection_note: item.personalization_context || item.connection_note || "Hi, I noticed your team's work and would love to connect.",
+      connection_note:
+        item.personalization_context ||
+        item.connection_note ||
+        "Hi, I noticed your team's work and would love to connect.",
       created_at: item.created_at,
       updated_at: item.updated_at || item.created_at,
     }));
 
     return {
-      totalProspects: contacts.length,
-      draftsPendingApproval: contacts.filter((c) => c.status === "draft_pending_approval").length,
-      approvedCount: contacts.filter((c) => c.status === "approved").length,
-      sentCount: contacts.filter((c) => c.status === "sent").length,
-      connectedCount: contacts.filter((c) => c.status === "connected").length,
-      inConversationCount: contacts.filter((c) => c.status === "in_conversation").length,
-      contacts,
+      data: {
+        totalProspects: contacts.length,
+        draftsPendingApproval: contacts.filter((c) => c.status === "draft_pending_approval").length,
+        approvedCount: contacts.filter((c) => c.status === "approved").length,
+        sentCount: contacts.filter((c) => c.status === "sent").length,
+        connectedCount: contacts.filter((c) => c.status === "connected").length,
+        inConversationCount: contacts.filter((c) => c.status === "in_conversation").length,
+        contacts,
+      },
+      status: "success",
+      error: null,
     };
   } catch (err: any) {
     console.error("fetchOutreachStats failed:", err?.message || err);
     return {
-      totalProspects: 0,
-      draftsPendingApproval: 0,
-      approvedCount: 0,
-      sentCount: 0,
-      connectedCount: 0,
-      inConversationCount: 0,
-      contacts: [],
+      data: emptyStats,
+      status: "connection_error",
+      error: err?.message || "Failed to load outreach contacts",
     };
   }
 }

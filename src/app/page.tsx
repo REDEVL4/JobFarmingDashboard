@@ -1,6 +1,6 @@
 import React from "react";
 import Link from "next/link";
-import { ArrowRight, RefreshCw, Sparkles, AlertTriangle } from "lucide-react";
+import { ArrowRight, RefreshCw, Sparkles, AlertTriangle, AlertCircle, ShieldAlert } from "lucide-react";
 import { fetchApplications, computeMetrics } from "@/lib/data-service";
 import { KpiGrid } from "@/components/dashboard/kpi-grid";
 import { AnalyticsCharts } from "@/components/dashboard/analytics-charts";
@@ -9,7 +9,8 @@ import { Button } from "@/components/ui/button";
 export const dynamic = "force-dynamic";
 
 export default async function DashboardPage() {
-  const applications = await fetchApplications();
+  const result = await fetchApplications();
+  const applications = result.data;
   const metrics = computeMetrics(applications);
 
   return (
@@ -42,6 +43,31 @@ export default async function DashboardPage() {
           </Button>
         </div>
       </div>
+
+      {/* Honest Error / Unauthenticated State */}
+      {result.status !== "success" && result.status !== "empty" && (
+        <div className="p-4 rounded-xl border border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-400 space-y-1.5">
+          <div className="flex items-center gap-2 font-bold text-sm">
+            <ShieldAlert className="h-5 w-5 shrink-0" />
+            <span>
+              {result.status === "unauthenticated"
+                ? "Owner Authentication Required"
+                : result.status === "permission_denied"
+                ? "Database Query Permission Denied (RLS Boundary)"
+                : "Database Connection Failure"}
+            </span>
+          </div>
+          <p className="text-xs leading-relaxed">{result.error}</p>
+        </div>
+      )}
+
+      {/* Empty Database State */}
+      {result.status === "empty" && (
+        <div className="p-12 text-center border rounded-xl space-y-2 bg-card">
+          <p className="text-base font-semibold text-foreground">Zero Applications In Database</p>
+          <p className="text-xs text-muted-foreground">The job_applications table is currently empty.</p>
+        </div>
+      )}
 
       {/* 10 Core KPI Cards */}
       <section className="space-y-3">
@@ -77,4 +103,3 @@ export default async function DashboardPage() {
     </div>
   );
 }
-

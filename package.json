@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "next lint",
     "test": "node --test \"tests/unit/**/*.test.mjs\"",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:login": "node scripts/interactive-login.mjs"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.6",

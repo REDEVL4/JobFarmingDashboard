@@ -8,6 +8,7 @@ import {
   Search,
   ExternalLink,
   ShieldCheck,
+  ShieldAlert,
   Sparkles,
   Inbox,
 } from "lucide-react";
@@ -36,7 +37,8 @@ function getRelativeTime(isoString?: string | null): string {
 }
 
 export default async function MonitoringPage() {
-  const stats = await fetchMonitoringStats();
+  const result = await fetchMonitoringStats();
+  const stats = result.data;
 
   return (
     <div className="space-y-8 animate-in fade-in duration-300">
@@ -59,6 +61,23 @@ export default async function MonitoringPage() {
           </span>
         </div>
       </div>
+
+      {/* Honest Error Notice */}
+      {result.status !== "success" && (
+        <div className="p-4 rounded-xl border border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-400 space-y-1.5">
+          <div className="flex items-center gap-2 font-bold text-sm">
+            <ShieldAlert className="h-5 w-5 shrink-0" />
+            <span>
+              {result.status === "unauthenticated"
+                ? "Owner Authentication Required"
+                : result.status === "permission_denied"
+                ? "Telemetry Query Permission Denied (RLS Boundary)"
+                : "Database Connection Failure"}
+            </span>
+          </div>
+          <p className="text-xs leading-relaxed">{result.error}</p>
+        </div>
+      )}
 
       {/* Sync Health & Engine Status Bar */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
