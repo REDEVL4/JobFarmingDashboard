@@ -2,6 +2,10 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import postgres from "npm:postgres@3.4.5";
 import { classifyRecruitmentEmail } from "./classifier.ts";
 import { matchApplicationToEmail, isMessageProcessed } from "./matcher.ts";
+import {
+  resolveScanWindow,
+  computeContinuationState,
+} from "./continuation.ts";
 import type {
   CandidateApplication,
   CanonicalHiringStage,
@@ -252,35 +256,36 @@ Deno.serve(async (req) => {
       }, 403);
     }
 
-    // 6. HARDENED CHECKPOINT RESOLUTION:
-    // Strictly retrieve the latest completed, verified PRODUCTION run (dry_run IS NOT true).
-    // Dry-run logs must NEVER advance the next scan window.
-    let lastScanTimeMs: number;
-    if (gapReconcile) {
-      lastScanTimeMs = new Date(LAST_VERIFIED_CHECKPOINT).getTime() - OVERLAP_MINUTES * 60_000;
-    } else {
-      const [latestProductionLog] = await sql`
-        select started_at, completed_at, verification_results
-          from jobbot.sync_logs
-         where bot_name = ${BOT_NAME}
-           and verification_results->>'status' = 'completed'
-           and coalesce((verification_results->>'dry_run')::boolean, false) = false
-         order by started_at desc limit 1
-      `;
+    // 6. HARDENED CHECKPOINT & RESUMABLE BACKFILL RESOLUTION:
+    // Strictly retrieve the latest verified PRODUCTION run (dry_run IS NOT true).
+    // An incomplete backfill (status='partial_backfill') or dry-run log must NEVER
+    // advance the production checkpoint past unprocessed messages.
+    const [latestProductionLog] = await sql`
+      select started_at, completed_at, verification_results
+        from jobbot.sync_logs
+       where bot_name = ${BOT_NAME}
+         and coalesce((verification_results->>'dry_run')::boolean, false) = false
+       order by started_at desc limit 1
+    `;
 
-      if (latestProductionLog?.completed_at) {
-        lastScanTimeMs = new Date(latestProductionLog.completed_at).getTime() - OVERLAP_MINUTES * 60_000;
-      } else {
-        lastScanTimeMs = new Date(LAST_VERIFIED_CHECKPOINT).getTime() - OVERLAP_MINUTES * 60_000;
-      }
+    const scanWindow = resolveScanWindow({
+      latestProductionLog,
+      gapReconcile,
+      lastVerifiedCheckpoint: LAST_VERIFIED_CHECKPOINT,
+      overlapMinutes: OVERLAP_MINUTES,
+      bodyBeforeEpoch: body.continuation_before_epoch ? Number(body.continuation_before_epoch) : null,
+      bodyAfterEpoch: body.continuation_after_epoch ? Number(body.continuation_after_epoch) : null,
+    });
+
+    let gmailQuery = `after:${scanWindow.queryAfterEpoch}`;
+    if (scanWindow.queryBeforeEpoch) {
+      gmailQuery += ` before:${scanWindow.queryBeforeEpoch}`;
     }
-
-    const queryEpochSeconds = Math.floor(lastScanTimeMs / 1000);
-    const gmailQuery = `after:${queryEpochSeconds} (label:INBOX OR label:SENT) -from:security-noreply@*`;
+    gmailQuery += ` (label:INBOX OR label:SENT) -from:security-noreply@*`;
 
     // 7. Discover Gmail messages with pagination tracking
     const rawMessageHeaders: Array<{ id: string; threadId: string }> = [];
-    let pageToken = "";
+    let pageToken = body.continuation_page_token || "";
     let reachedLimit = false;
 
     do {
@@ -297,10 +302,6 @@ Deno.serve(async (req) => {
         break;
       }
     } while (pageToken);
-
-    // If more pages exist beyond maxMessages, the backfill is incomplete.
-    // Checkpoint must NOT advance to completedAt in this run!
-    const hasMoreBacklog = Boolean(pageToken) || reachedLimit;
 
     // 8. Load known applications and deduplication sets
     const [appsRows, reviewRows, eventRows] = await Promise.all([
@@ -377,12 +378,18 @@ Deno.serve(async (req) => {
 
     const ignoredMessageIds: string[] = [];
     let maxInternalDate = 0;
+    let minInternalDate = Infinity;
 
     for (const msg of fetchedMessages) {
       const msgId = msg.id;
       const internalDate = Number(msg.internalDate || 0);
-      if (internalDate > maxInternalDate) {
-        maxInternalDate = internalDate;
+      if (internalDate > 0) {
+        if (internalDate > maxInternalDate) {
+          maxInternalDate = internalDate;
+        }
+        if (internalDate < minInternalDate) {
+          minInternalDate = internalDate;
+        }
       }
 
       const headers = msg.payload?.headers || [];
@@ -475,11 +482,25 @@ Deno.serve(async (req) => {
 
     const completedAt = new Date().toISOString();
 
+    const continuation = computeContinuationState({
+      rawMessageCount: rawMessageHeaders.length,
+      maxMessages,
+      hasRemainingPageToken: Boolean(pageToken),
+      minInternalDate: minInternalDate !== Infinity ? minInternalDate : undefined,
+      queryAfterEpoch: scanWindow.queryAfterEpoch,
+      isResumingBackfill: scanWindow.isResumingBackfill,
+      continuationCeilingTime: scanWindow.continuationCeilingTime,
+      startedAt,
+      completedAt,
+      dryRun,
+    });
+
     // 11. STRICT DRY-RUN EXECUTION BRANCH
     if (dryRun) {
       // In DRY RUN mode:
       // - updated_count is strictly 0 (no actual committed updates)
       // - proposed updates are recorded separately in verification_results
+      // - checkpoint_advanced is strictly false
       // - No sync_cursors advancement
       // - No application status updates
       // - No application_events inserts
@@ -493,13 +514,21 @@ Deno.serve(async (req) => {
           ${0}, ${0}, ${duplicateCount + ignoredMessageIds.length},
           ${JSON.stringify([])}::jsonb,
           ${JSON.stringify({
-            status: "dry_run_completed",
+            status: continuation.status,
             dry_run: true,
             mailbox: OWNER_EMAIL,
-            run_kind: gapReconcile ? "gap_reconciliation_dry_run" : "scheduled_incremental_poll_dry_run",
-            scan_start_at: new Date(lastScanTimeMs).toISOString(),
+            run_kind: scanWindow.isResumingBackfill
+              ? "backfill_continuation_dry_run"
+              : (gapReconcile ? "gap_reconciliation_dry_run" : "scheduled_incremental_poll_dry_run"),
+            scan_start_at: new Date(scanWindow.queryAfterEpoch * 1000).toISOString(),
             last_gmail_scan_at: completedAt,
-            has_more_backlog: hasMoreBacklog,
+            has_more_backlog: continuation.hasMoreBacklog,
+            all_pages_complete: continuation.allPagesComplete,
+            checkpoint_advanced: false,
+            continuation_before_epoch: continuation.nextContinuationBeforeEpoch,
+            continuation_after_epoch: continuation.nextContinuationAfterEpoch,
+            continuation_ceiling_time: continuation.nextContinuationCeilingTime,
+            continuation_page_token: continuation.hasMoreBacklog ? (pageToken || null) : null,
             messages_discovered: rawMessageHeaders.length,
             proposed_changes_count: proposedChanges.length,
             proposed_reviews_count: proposedReviews.length,
@@ -511,13 +540,17 @@ Deno.serve(async (req) => {
         )
       `;
 
-      const result: SyncRunResult = {
+      const result: SyncRunResult & {
+        hasMoreBacklog: boolean;
+        checkpointAdvanced: boolean;
+        continuation?: any;
+      } = {
         runId,
-        status: "dry_run_completed",
+        status: continuation.status as any,
         mailbox: OWNER_EMAIL,
         dryRun: true,
         gapReconciled: gapReconcile,
-        scanStartAt: new Date(lastScanTimeMs).toISOString(),
+        scanStartAt: new Date(scanWindow.queryAfterEpoch * 1000).toISOString(),
         scanEndAt: completedAt,
         messagesFound: rawMessageHeaders.length,
         messagesClassified: proposedChanges.length + proposedReviews.length,
@@ -539,20 +572,36 @@ Deno.serve(async (req) => {
             candidateCount: r.candidateApplications.length,
           })),
         },
+        hasMoreBacklog: continuation.hasMoreBacklog,
+        checkpointAdvanced: false,
+        continuation: continuation.hasMoreBacklog ? {
+          beforeEpoch: continuation.nextContinuationBeforeEpoch,
+          afterEpoch: continuation.nextContinuationAfterEpoch,
+          ceilingTime: continuation.nextContinuationCeilingTime,
+          pageToken: pageToken || undefined,
+        } : null,
       };
 
       return json(result, 200);
     }
 
     // 12. ATOMIC LIVE WRITES (Only runs when both requested AND serverGateEnabled is true)
+    let actualCommittedUpdates = 0;
+    let duplicateDeliveriesSkipped = 0;
+    let actualCommittedReviews = 0;
+
     await sql.begin(async (tx) => {
-      // Insert immutable application events and update application stage
+      // Invariant: Update application hiring stage ONLY IF corresponding Gmail event was actually inserted.
+      // If event already exists (duplicate), DO NOT update application.
       for (const change of proposedChanges) {
-        await tx`
+        const externalEventId = `gmail-status:${OWNER_EMAIL}:${change.messageId}`;
+
+        const inserted = await tx`
           insert into jobbot.application_events (
             id, application_id, event_type, previous_status, new_status,
             event_at, evidence_source, external_event_id, actor, verification_status, notes
-          ) values (
+          )
+          select
             ${crypto.randomUUID()}::uuid,
             ${change.applicationId}::uuid,
             'hiring_stage_change',
@@ -560,7 +609,7 @@ Deno.serve(async (req) => {
             ${change.newStage},
             ${new Date(change.internalDate).toISOString()}::timestamptz,
             'gmail',
-            ${`gmail-status:${OWNER_EMAIL}:${change.messageId}`},
+            ${externalEventId},
             'bot',
             'verified',
             ${JSON.stringify({
@@ -569,27 +618,38 @@ Deno.serve(async (req) => {
               message_id: change.messageId,
               quote: change.quote,
               ingested_at: completedAt,
-            })}
+            })}::jsonb
+          where not exists (
+            select 1 from jobbot.application_events
+             where external_event_id = ${externalEventId}
           )
-          on conflict do nothing
+          returning id
         `;
 
-        await tx`
-          update jobbot.job_applications
-             set hiring_stage = ${change.newStage},
-                 updated_at = now()
-           where id = ${change.applicationId}::uuid
-        `;
+        if (inserted && inserted.length > 0) {
+          // Event was ACTUALLY inserted for the first time -> update application hiring stage
+          await tx`
+            update jobbot.job_applications
+               set hiring_stage = ${change.newStage},
+                   updated_at = now()
+             where id = ${change.applicationId}::uuid
+          `;
+          actualCommittedUpdates++;
+        } else {
+          // Event already exists (duplicate or concurrent delivery) -> skip application update
+          duplicateDeliveriesSkipped++;
+        }
       }
 
-      // Insert ambiguous matches into review queue
+      // Insert ambiguous matches into review queue ONLY IF not already existing
       for (const review of proposedReviews) {
-        await tx`
+        const insertedReview = await tx`
           insert into jobbot.recruitment_review_items (
             id, mailbox, message_id, thread_id, event_at,
             reason_code, proposed_stage, candidate_applications,
             evidence_summary, state, created_at, updated_at
-          ) values (
+          )
+          select
             ${crypto.randomUUID()}::uuid,
             ${review.mailbox},
             ${review.messageId},
@@ -602,12 +662,22 @@ Deno.serve(async (req) => {
             'open',
             now(),
             now()
+          where not exists (
+            select 1 from jobbot.recruitment_review_items
+             where mailbox = ${review.mailbox}
+               and message_id = ${review.messageId}
           )
-          on conflict do nothing
+          returning id
         `;
+
+        if (insertedReview && insertedReview.length > 0) {
+          actualCommittedReviews++;
+        }
       }
 
       // Record live production sync_log
+      // Invariant: An incomplete backfill (hasMoreBacklog=true) MUST NEVER create a log
+      // that can advance the checkpoint past unprocessed messages!
       await tx`
         insert into jobbot.sync_logs (
           run_id, bot_name, started_at, completed_at,
@@ -615,19 +685,28 @@ Deno.serve(async (req) => {
           errors, verification_results
         ) values (
           ${runId}::uuid, ${BOT_NAME}, ${startedAt}::timestamptz, ${completedAt}::timestamptz,
-          ${0}, ${proposedChanges.length}, ${duplicateCount + ignoredMessageIds.length},
+          ${0}, ${actualCommittedUpdates}, ${duplicateCount + ignoredMessageIds.length + duplicateDeliveriesSkipped},
           ${JSON.stringify([])}::jsonb,
           ${JSON.stringify({
-            status: "completed",
+            status: continuation.status,
             dry_run: false,
             mailbox: OWNER_EMAIL,
-            run_kind: gapReconcile ? "gap_reconciliation" : "scheduled_incremental_poll",
-            scan_start_at: new Date(lastScanTimeMs).toISOString(),
+            run_kind: scanWindow.isResumingBackfill
+              ? "backfill_continuation"
+              : (gapReconcile ? "gap_reconciliation" : "scheduled_incremental_poll"),
+            scan_start_at: new Date(scanWindow.queryAfterEpoch * 1000).toISOString(),
             last_gmail_scan_at: completedAt,
-            has_more_backlog: hasMoreBacklog,
+            has_more_backlog: continuation.hasMoreBacklog,
+            all_pages_complete: continuation.allPagesComplete,
+            checkpoint_advanced: continuation.checkpointAdvanced,
+            continuation_before_epoch: continuation.nextContinuationBeforeEpoch,
+            continuation_after_epoch: continuation.nextContinuationAfterEpoch,
+            continuation_ceiling_time: continuation.nextContinuationCeilingTime,
+            continuation_page_token: continuation.hasMoreBacklog ? (pageToken || null) : null,
             messages_discovered: rawMessageHeaders.length,
-            updated_count: proposedChanges.length,
-            review_queued_count: proposedReviews.length,
+            updated_count: actualCommittedUpdates,
+            duplicate_deliveries_skipped: duplicateDeliveriesSkipped,
+            review_queued_count: actualCommittedReviews,
             latest_successful_database_write_at: completedAt,
           })}::jsonb
         )
@@ -636,11 +715,19 @@ Deno.serve(async (req) => {
 
     return json({
       runId,
-      status: "sync_succeeded",
+      status: continuation.hasMoreBacklog ? "partial_backfill_succeeded" : "sync_succeeded",
       dryRun: false,
-      updated: proposedChanges.length,
-      reviewsQueued: proposedReviews.length,
-      hasMoreBacklog,
+      updated: actualCommittedUpdates,
+      duplicateDeliveriesSkipped,
+      reviewsQueued: actualCommittedReviews,
+      hasMoreBacklog: continuation.hasMoreBacklog,
+      checkpointAdvanced: continuation.checkpointAdvanced,
+      continuation: continuation.hasMoreBacklog ? {
+        beforeEpoch: continuation.nextContinuationBeforeEpoch,
+        afterEpoch: continuation.nextContinuationAfterEpoch,
+        ceilingTime: continuation.nextContinuationCeilingTime,
+        pageToken: pageToken || undefined,
+      } : null,
       completedAt,
     });
   } catch (err: any) {

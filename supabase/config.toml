@@ -1,6 +1,10 @@
 # Supabase Project Configuration
-# Scoped configuration for Edge Functions
+project_id = "mldtysploensrrulchdl"
 
+# Scoped configuration for Edge Functions:
+# JWT gateway verification disabled for gmail-status-sync;
+# application-level shared secret (x-jf-monitor-token) is enforced.
 [functions.gmail-status-sync]
 verify_jwt = false
+
 
