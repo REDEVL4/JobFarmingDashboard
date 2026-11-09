@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "node --test \"tests/unit/**/*.test.mjs\"",
+    "test": "node --experimental-strip-types --test \"tests/unit/**/*.test.mjs\"",
     "test:e2e": "playwright test",
     "test:login": "node scripts/interactive-login.mjs"
   },

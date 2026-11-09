@@ -122,14 +122,27 @@ export interface DashboardMetrics {
   }[];
 }
 
+export interface GmailClassificationBreakdown {
+  rejections: number;
+  interviews: number;
+  assessments: number;
+  offers: number;
+  acknowledgments: number;
+}
+
 export interface GmailMonitoringStats {
-  connectionStatus: "connected" | "disconnected" | "error";
+  connectionStatus: "connected" | "disconnected" | "needs_auth" | "error";
   lastSyncAt: string | null;
   nextScheduledSyncAt: string | null;
+  schedulerStatus: "active" | "paused" | "disabled" | "ready_pending_verification";
+  schedulerCron: string;
+  dryRunEnabled: boolean;
   emailsEvaluatedCount: number;
   statusChangesConfirmedCount: number;
   needsReviewCount: number;
   failedSyncAttemptsCount: number;
+  lastErrorDetail?: string | null;
+  classificationBreakdown: GmailClassificationBreakdown;
   events: DbEmailEvent[];
   reviewQueue: DbEmailEvent[];
 }

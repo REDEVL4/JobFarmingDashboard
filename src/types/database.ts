@@ -159,6 +159,21 @@ export interface DbOutreachContact {
   updated_at: string;
 }
 
+export interface DbSyncLogVerificationResults {
+  status?: string;
+  mailbox?: string;
+  run_kind?: string;
+  scan_start_at?: string;
+  last_gmail_scan_at?: string;
+  full_scan_cutoff_at?: string;
+  ignored_message_ids?: string[];
+  processed_message_ids?: string[];
+  unresolved_review_count?: number;
+  latest_successful_database_write_at?: string;
+  proposed_changes_count?: number;
+  dry_run?: boolean;
+}
+
 export interface DbSyncLog {
   run_id: string;
   bot_name: string;
@@ -168,7 +183,19 @@ export interface DbSyncLog {
   updated_count: number;
   skipped_count: number;
   errors: any;
-  verification_results: any;
+  verification_results: DbSyncLogVerificationResults | any;
+}
+
+export interface DbMonitorSettings {
+  id: string;
+  owner_id: string;
+  enabled: boolean;
+  paused: boolean;
+  interval_minutes: number;
+  last_run_at?: string | null;
+  next_run_at?: string | null;
+  ai_dispatch_enabled: boolean;
+  updated_at: string;
 }
 
 // Compatibility aliases for dashboard view models

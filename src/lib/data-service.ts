@@ -399,10 +399,21 @@ export async function fetchMonitoringStats(): Promise<DataResult<GmailMonitoring
     connectionStatus: "disconnected",
     lastSyncAt: null,
     nextScheduledSyncAt: null,
+    schedulerStatus: "ready_pending_verification",
+    schedulerCron: "49 * * * *",
+    dryRunEnabled: true,
     emailsEvaluatedCount: 0,
     statusChangesConfirmedCount: 0,
     needsReviewCount: 0,
     failedSyncAttemptsCount: 0,
+    lastErrorDetail: null,
+    classificationBreakdown: {
+      rejections: 0,
+      interviews: 0,
+      assessments: 0,
+      offers: 0,
+      acknowledgments: 0,
+    },
     events: [],
     reviewQueue: [],
   };
@@ -467,17 +478,49 @@ export async function fetchMonitoringStats(): Promise<DataResult<GmailMonitoring
       ? new Date(new Date(lastSyncTime).getTime() + 60 * 60 * 1000).toISOString()
       : null;
 
+    const latestError = syncLogs.find(
+      (l) => Array.isArray(l.errors) && l.errors.length > 0
+    );
+    const lastErrorDetail = latestError?.errors?.[0]?.detail || latestError?.errors?.[0]?.code || null;
+
+    // Tally proposed stages from open review items and sync logs
+    let rejections = 0;
+    let interviews = 0;
+    let assessments = 0;
+    let offers = 0;
+    let acknowledgments = 0;
+
+    reviewItems.forEach((item) => {
+      const stage = (item.proposed_stage || "").toLowerCase();
+      if (stage.includes("reject")) rejections++;
+      else if (stage.includes("interview")) interviews++;
+      else if (stage.includes("assessment")) assessments++;
+      else if (stage.includes("offer")) offers++;
+      else acknowledgments++;
+    });
+
     return {
       data: {
         connectionStatus: latestSync ? "connected" : "disconnected",
         lastSyncAt: lastSyncTime,
         nextScheduledSyncAt: nextSyncTime,
+        schedulerStatus: "ready_pending_verification",
+        schedulerCron: "49 * * * *",
+        dryRunEnabled: true,
         emailsEvaluatedCount: totalScanned,
         statusChangesConfirmedCount: totalConfirmed,
         needsReviewCount: reviewItems.filter((i) => i.state === "open").length,
         failedSyncAttemptsCount: syncLogs.filter(
           (l) => Array.isArray(l.errors) && l.errors.length > 0
         ).length,
+        lastErrorDetail,
+        classificationBreakdown: {
+          rejections,
+          interviews,
+          assessments,
+          offers,
+          acknowledgments,
+        },
         events: mappedEvents,
         reviewQueue: mappedEvents.filter((e) => e.classification === "acknowledgement"),
       },
