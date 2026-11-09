@@ -198,3 +198,4 @@ test("Grok Intelligence MCP Edge Function File Audit", () => {
   assert.ok(!code.includes("claim_work"), "Does not register legacy claim_work");
   assert.ok(!code.includes("complete_work"), "Does not register legacy complete_work");
 });
+

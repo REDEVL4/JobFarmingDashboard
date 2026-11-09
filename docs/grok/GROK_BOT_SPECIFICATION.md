@@ -83,3 +83,4 @@ Follow these exact steps in the Grok web interface:
   - `55 * * * *`: Grok Recruitment Intelligence Routine runs, fetches the newly queued pending messages, matches applications, and posts classification proposals to `jobbot.recruitment_review_items`.
 - **Manual Gate Before Unattended Activation**:
   - The routine MUST NOT be scheduled in unattended mode until at least ONE interactive run is manually triggered and verified by the owner.
+
