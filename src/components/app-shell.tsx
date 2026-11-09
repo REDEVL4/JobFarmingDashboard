@@ -32,9 +32,9 @@ interface NavItem {
 
 const NAVIGATION: NavItem[] = [
   { name: "Executive Dashboard", href: "/", icon: LayoutDashboard },
-  { name: "Applications Tracker", href: "/applications", icon: Briefcase, badge: "236" },
-  { name: "Gmail Monitoring", href: "/monitoring", icon: MailCheck, badge: "1" },
-  { name: "LinkedIn CRM", href: "/outreach", icon: Users, badge: "10" },
+  { name: "Applications Tracker", href: "/applications", icon: Briefcase },
+  { name: "Gmail Monitoring", href: "/monitoring", icon: MailCheck },
+  { name: "LinkedIn CRM", href: "/outreach", icon: Users },
   { name: "MCP & Diagnostics", href: "/diagnostics", icon: Cpu },
   { name: "OAuth Consent", href: "/oauth/consent", icon: KeyRound },
 ];
@@ -43,6 +43,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+
+  // Auth pages (login, oauth consent) do not render the dashboard navigation shell
+  const isAuthPage = pathname === "/login" || pathname?.startsWith("/oauth");
+  if (isAuthPage) {
+    return <main className="min-h-screen bg-background">{children}</main>;
+  }
 
   return (
     <div className="min-h-screen bg-background flex flex-col md:flex-row">
