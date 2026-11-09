@@ -22,11 +22,9 @@ import {
   DESIGNATED_OWNER_UUID,
   DESIGNATED_OWNER_EMAIL,
   STANDARD_SCOPES,
-  TRUSTED_OAUTH_CLIENT_IDS,
   validateAuthorizationId,
   validateOwnerAccess,
   validateOAuthClient,
-  validateAutoRedirectUrl,
   type ClientTrustResult,
 } from "@/lib/oauth-validation";
 import type { OAuthAuthorizationDetails } from "@supabase/supabase-js";
@@ -101,57 +99,22 @@ function ConsentContent() {
           return;
         }
 
-        // If 'authorization_id' is NOT in data, user has previously consented.
-        // SECURITY CHECK: Verify that the auto-redirect does not bypass client trust policy!
-        if (!("authorization_id" in data)) {
-          const autoRedirect = (data as { redirect_url: string }).redirect_url;
-          const redirectValidation = validateAutoRedirectUrl(autoRedirect);
-
-          if (!redirectValidation.valid) {
-            if (isMounted) {
-              setErrorMessage(
-                `Access denied: ${redirectValidation.error} Automatic redirect blocked to prevent unauthorized client access.`
-              );
-              setLoading(false);
-            }
-            return;
-          }
-
-          // Verify that the user's active grants actually include an approved client
-          const { data: grants, error: grantsError } = await supabase.auth.oauth.listGrants();
-          if (grantsError || !grants) {
-            if (isMounted) {
-              setErrorMessage(
-                "Unable to verify previously approved client grants. Automatic redirect blocked for security."
-              );
-              setLoading(false);
-            }
-            return;
-          }
-
-          const hasTrustedGrant = grants.some(
-            (g) => g.client && TRUSTED_OAUTH_CLIENT_IDS.has(g.client.id)
-          );
-
-          if (!hasTrustedGrant) {
-            if (isMounted) {
-              setErrorMessage(
-                "Access denied: Previously recorded authorization grant belongs to an unapproved or revoked client. Automatic redirect blocked. Contact administrator to explicitly authorize this client ID."
-              );
-              setLoading(false);
-            }
-            return;
-          }
-
+        // Step 4.1: Require explicit verified authorization details linking this request to the client
+        // In Supabase OAuth 2.1, when a user previously consented, getAuthorizationDetails returns
+        // only { redirect_url: string } without client identity or authorization_id.
+        // That does NOT establish that THIS request belongs to the approved client ID (16bdb57f-c2cd-40d8-b6e1-c1a1b17e3f32).
+        // Therefore, automatic approval without explicit client details is strictly blocked.
+        if (!("authorization_id" in data) || !("client" in data) || !data.client || !data.client.id) {
           if (isMounted) {
-            setRedirectUrl(autoRedirect);
-            setDecisionCompleted("approved");
+            setErrorMessage(
+              "Automatic approval blocked: The authorization request cannot be verified against the approved client ID because explicit client details were omitted by the server. A fresh verified authorization flow with explicit owner consent is required."
+            );
+            setLoading(false);
           }
-          window.location.assign(autoRedirect);
           return;
         }
 
-        // Step 4.5: Validate client trust, callback URI, and identity policy
+        // Step 4.2: Validate client trust, callback URI, and exact client ID linkage
         const trustResult = validateOAuthClient(data.client, data.redirect_uri);
         if (!trustResult.trusted) {
           if (isMounted) {

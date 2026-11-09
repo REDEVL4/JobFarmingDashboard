@@ -45,6 +45,20 @@ const handler = pipeline(
       return Response.json({ error: 'Unauthorized OAuth client' }, { status: 403 });
     }
     const message = req.method === 'POST' ? await req.clone().json().catch(() => null) : null;
+    // Strictly restrict OAuth callers to read-only runtime_status tool execution
+    if (message?.method === 'tools/call') {
+      const toolName = message.params?.name;
+      if (toolName !== 'runtime_status') {
+        return Response.json({
+          jsonrpc: '2.0',
+          id: message.id,
+          error: {
+            code: -32601,
+            message: `Tool '${toolName}' is disabled for OAuth clients. Only read-only 'runtime_status' is permitted.`,
+          },
+        }, { status: 403 });
+      }
+    }
     const mcp = createMcpHandler(() => {
       const server = new McpServer({ name: 'jf-grok-owner-mcp', version: '0.2.0' });
       server.registerTool(

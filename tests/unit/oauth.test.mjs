@@ -17,7 +17,7 @@ import {
 } from "../../src/lib/oauth-validation.ts";
 
 // Helper for simulating MCP pipeline authorization
-function evaluateMcpAuth(jwtClaims) {
+function evaluateMcpAuth(jwtClaims, toolName = "runtime_status") {
   if (jwtClaims?.sub !== DESIGNATED_OWNER_UUID) {
     return { allowed: false, status: 403, error: "Owner authentication required" };
   }
@@ -32,6 +32,14 @@ function evaluateMcpAuth(jwtClaims) {
   if (!TRUSTED_OAUTH_CLIENT_IDS.has(clientId)) {
     return { allowed: false, status: 403, error: "Unauthorized OAuth client" };
   }
+  // Enforce read-only tool restriction for OAuth tokens
+  if (toolName !== "runtime_status") {
+    return {
+      allowed: false,
+      status: 403,
+      error: `Tool '${toolName}' is disabled for OAuth clients. Only read-only 'runtime_status' is permitted.`,
+    };
+  }
   return { allowed: true };
 }
 
@@ -40,6 +48,43 @@ function evaluateRlsPolicy({ uid, claims }) {
   const isOwner = uid === DESIGNATED_OWNER_UUID;
   const isDirectDashboardSession = claims?.client_id === undefined || claims?.client_id === null;
   return isOwner && isDirectDashboardSession;
+}
+
+// Helper for evaluating consent details response from Supabase Auth
+function evaluateConsentResponse(data) {
+  if (!data || !("authorization_id" in data) || !("client" in data) || !data.client || !data.client.id) {
+    return {
+      trusted: false,
+      blocked: true,
+      reason: "Automatic approval blocked: Request lacks verified client linkage. Fresh verified authorization flow required.",
+    };
+  }
+  return validateOAuthClient(data.client, data.redirect_uri);
+}
+
+// Helper for simulating Database RPC authorization gates
+function evaluateRpcAccess({ functionName, isMutation, claims }) {
+  const isOwner = claims?.sub === DESIGNATED_OWNER_UUID;
+  const isServiceRole = claims?.role === "service_role";
+  const hasClientId = Boolean(claims?.client_id);
+  const isApprovedGrok = claims?.client_id === ACTIVE_GROK_CLIENT_ID;
+
+  if (isServiceRole) return { allowed: true };
+  if (!isOwner) return { allowed: false, error: "Owner required" };
+
+  if (functionName === "jf_owner_runtime_status") {
+    if (!hasClientId || isApprovedGrok) return { allowed: true };
+    return { allowed: false, error: "Unauthorized OAuth client" };
+  }
+
+  if (isMutation) {
+    if (hasClientId) {
+      return { allowed: false, error: "OAuth tokens are not permitted to invoke work mutation functions" };
+    }
+    return { allowed: true };
+  }
+
+  return { allowed: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -153,35 +198,37 @@ test("OAuth: keeps dynamically registered clients untrusted until explicit owner
 });
 
 // ---------------------------------------------------------------------------
-// 6. Previously Consented Unknown Client (Auto-Redirect Bypass Check)
+// 6. Current Consent Request Cannot Reuse Another Client's Grant
 // ---------------------------------------------------------------------------
-test("OAuth: blocks auto-redirect when target is unauthorized or client grant is untrusted", () => {
-  // Case A: Redirect points to unauthorized destination
-  const cursorAutoRedirect = validateAutoRedirectUrl(
-    "https://www.cursor.com/agents/mcp/oauth/callback?code=auth_123&state=state_abc"
-  );
-  assert.equal(cursorAutoRedirect.valid, false);
-  assert.match(cursorAutoRedirect.error, /Unauthorized auto-redirect destination/);
+test("OAuth: blocks automatic redirect when response lacks verified client details", () => {
+  // Case A: Supabase returns only redirect_url without authorization_id/client details
+  const autoRedirectResponse = {
+    redirect_url: "https://grok.com/connectors-oauth-exchange-code/?code=auth_123&state=state_abc",
+  };
+  const evaluated = evaluateConsentResponse(autoRedirectResponse);
+  assert.equal(evaluated.trusted, false);
+  assert.equal(evaluated.blocked, true);
+  assert.match(evaluated.reason, /Automatic approval blocked: Request lacks verified client linkage/);
 
-  // Case B: Valid Grok redirect URL
-  const grokAutoRedirect = validateAutoRedirectUrl(
-    "https://grok.com/connectors-oauth-exchange-code/?code=auth_123&state=state_abc"
-  );
-  assert.equal(grokAutoRedirect.valid, true);
+  // Case B: Explicit verified authorization details matching approved Grok client
+  const freshConsentResponse = {
+    authorization_id: "sq5waqj6n3wanxvh2zsp3jqmygqnyyr5",
+    client: { id: ACTIVE_GROK_CLIENT_ID, name: "Grok" },
+    redirect_uri: VERIFIED_GROK_CALLBACK_URI,
+  };
+  const evaluatedFresh = evaluateConsentResponse(freshConsentResponse);
+  assert.equal(evaluatedFresh.trusted, true);
+  assert.equal(evaluatedFresh.clientId, ACTIVE_GROK_CLIENT_ID);
 
-  // Case C: Grants verification - user has only Cursor grant, no trusted Grok grant
-  const cursorOnlyGrants = [
-    { client: { id: "7a493089-0500-4b0d-8a00-12140c16ac52", name: "Cursor" }, scopes: ["email"] },
-  ];
-  const hasTrusted = cursorOnlyGrants.some((g) => TRUSTED_OAUTH_CLIENT_IDS.has(g.client.id));
-  assert.equal(hasTrusted, false);
-
-  // Case D: Grants verification - user has approved Grok grant
-  const approvedGrokGrants = [
-    { client: { id: ACTIVE_GROK_CLIENT_ID, name: "Grok" }, scopes: ["openid"] },
-  ];
-  const hasApproved = approvedGrokGrants.some((g) => TRUSTED_OAUTH_CLIENT_IDS.has(g.client.id));
-  assert.equal(hasApproved, true);
+  // Case C: Explicit details but unapproved client attempting to claim Grok callback
+  const unapprovedDetails = {
+    authorization_id: "sq5waqj6n3wanxvh2zsp3jqmygqnyyr5",
+    client: { id: "3a6b0c2a-51fb-43c8-8625-3056092fad8e", name: "Cursor" },
+    redirect_uri: VERIFIED_GROK_CALLBACK_URI,
+  };
+  const evaluatedUnapproved = evaluateConsentResponse(unapprovedDetails);
+  assert.equal(evaluatedUnapproved.trusted, false);
+  assert.equal(evaluatedUnapproved.isPendingApproval, true);
 });
 
 // ---------------------------------------------------------------------------
@@ -224,21 +271,95 @@ test("OAuth RLS: direct first-party owner dashboard session retains full table a
 });
 
 // ---------------------------------------------------------------------------
-// 9. MCP runtime_status Authorization
+// 9. Privileged RPC Access & MCP Tool Gating
 // ---------------------------------------------------------------------------
-test("MCP: authorizes approved Grok client to execute runtime_status tool", () => {
-  const validGrokClaims = {
+test("RPC & MCP: authorizes approved Grok client for runtime_status but denies mutation RPCs", () => {
+  const grokClaims = {
     sub: DESIGNATED_OWNER_UUID,
     role: "authenticated",
     client_id: ACTIVE_GROK_CLIENT_ID,
   };
 
-  const authResult = evaluateMcpAuth(validGrokClaims);
-  assert.equal(authResult.allowed, true);
+  // 1. Grok is allowed to execute read-only runtime_status tool in MCP
+  const mcpStatus = evaluateMcpAuth(grokClaims, "runtime_status");
+  assert.equal(mcpStatus.allowed, true);
+
+  // 2. Grok is allowed to execute jf_owner_runtime_status in DB
+  const dbStatus = evaluateRpcAccess({
+    functionName: "jf_owner_runtime_status",
+    isMutation: false,
+    claims: grokClaims,
+  });
+  assert.equal(dbStatus.allowed, true);
+
+  // 3. Grok is DENIED executing mutating tools in MCP (claim_work / complete_work)
+  const mcpClaim = evaluateMcpAuth(grokClaims, "claim_work");
+  assert.equal(mcpClaim.allowed, false);
+  assert.equal(mcpClaim.status, 403);
+  assert.match(mcpClaim.error, /disabled for OAuth clients/);
+
+  const mcpComplete = evaluateMcpAuth(grokClaims, "complete_work");
+  assert.equal(mcpComplete.allowed, false);
+  assert.equal(mcpComplete.status, 403);
+  assert.match(mcpComplete.error, /disabled for OAuth clients/);
+
+  // 4. Grok is DENIED executing privileged mutation RPCs directly in DB
+  const dbClaim = evaluateRpcAccess({
+    functionName: "jf_owner_claim_work",
+    isMutation: true,
+    claims: grokClaims,
+  });
+  assert.equal(dbClaim.allowed, false);
+  assert.match(dbClaim.error, /OAuth tokens are not permitted/);
+
+  const dbComplete = evaluateRpcAccess({
+    functionName: "jf_owner_complete_work",
+    isMutation: true,
+    claims: grokClaims,
+  });
+  assert.equal(dbComplete.allowed, false);
+  assert.match(dbComplete.error, /OAuth tokens are not permitted/);
+
+  const dbConfig = evaluateRpcAccess({
+    functionName: "jf_configure_work_webhook",
+    isMutation: true,
+    claims: grokClaims,
+  });
+  assert.equal(dbConfig.allowed, false);
+  assert.match(dbConfig.error, /OAuth tokens are not permitted/);
 });
 
 // ---------------------------------------------------------------------------
-// 10. Denial of Unauthorized MCP Tool Access
+// 10. First-Party Dashboard & Service-Role RPC Access
+// ---------------------------------------------------------------------------
+test("RPC: permits first-party owner and service-role to execute mutation RPCs", () => {
+  const dashboardClaims = {
+    sub: DESIGNATED_OWNER_UUID,
+    role: "authenticated",
+    email: DESIGNATED_OWNER_EMAIL,
+    // client_id is NULL
+  };
+
+  const dashboardAccess = evaluateRpcAccess({
+    functionName: "jf_owner_claim_work",
+    isMutation: true,
+    claims: dashboardClaims,
+  });
+  assert.equal(dashboardAccess.allowed, true);
+
+  const serviceRoleClaims = {
+    role: "service_role",
+  };
+  const serviceRoleAccess = evaluateRpcAccess({
+    functionName: "jf_confirm_outreach_sent",
+    isMutation: true,
+    claims: serviceRoleClaims,
+  });
+  assert.equal(serviceRoleAccess.allowed, true);
+});
+
+// ---------------------------------------------------------------------------
+// 11. Denial of Unauthorized Callers
 // ---------------------------------------------------------------------------
 test("MCP: strictly denies unauthorized callers and tools", () => {
   // Non-owner sub
@@ -253,13 +374,13 @@ test("MCP: strictly denies unauthorized callers and tools", () => {
     false
   );
 
-  // Removed Cursor client
+  // Unapproved Cursor client
   assert.equal(
     evaluateMcpAuth({ sub: DESIGNATED_OWNER_UUID, role: "authenticated", client_id: "7a493089-0500-4b0d-8a00-12140c16ac52" }).allowed,
     false
   );
 
-  // Removed trial client
+  // Unapproved trial client
   assert.equal(
     evaluateMcpAuth({ sub: DESIGNATED_OWNER_UUID, role: "authenticated", client_id: "67fc4ec0-f2cb-47ee-820d-b8649a08c761" }).allowed,
     false
