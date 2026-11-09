@@ -3,3 +3,4 @@
 
 [functions.gmail-status-sync]
 verify_jwt = false
+
