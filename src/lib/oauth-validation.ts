@@ -1,6 +1,30 @@
 export const DESIGNATED_OWNER_UUID = "f2729195-5445-4272-ab85-cac5b03b0967";
 export const DESIGNATED_OWNER_EMAIL = "govardhanreddy.vys7@gmail.com";
 
+// Specifically trusted connector callback URIs
+export const VERIFIED_GROK_CALLBACK_URI = "https://grok.com/connectors-oauth-exchange-code/";
+export const VERIFIED_CURSOR_CALLBACK_URI = "https://www.cursor.com/agents/mcp/oauth/callback";
+
+export const TRUSTED_REDIRECT_URIS = [
+  VERIFIED_GROK_CALLBACK_URI,
+  VERIFIED_CURSOR_CALLBACK_URI,
+];
+
+// Specifically trusted pre-registered Grok & Cursor OAuth client IDs in Supabase Auth
+export const TRUSTED_STATIC_CLIENT_IDS = new Set([
+  // Primary active Grok connector
+  "16bdb57f-c2cd-40d8-b6e1-c1a1b17e3f32",
+  // Initial Grok runtime_status trial client
+  "67fc4ec0-f2cb-47ee-820d-b8649a08c761",
+  // Historical Grok connector registrations
+  "5dbf5812-a40c-4235-83d0-301525ecdefc",
+  "7adf0097-049b-4f59-82b1-17b032938f85",
+  "b1a6f987-30e0-4aec-b8e3-24a90b13c21a",
+  "0115daf5-ddc6-4b56-a4dd-2189b95a1543",
+  // Cursor MCP agent client
+  "7a493089-0500-4b0d-8a00-12140c16ac52",
+]);
+
 export const STANDARD_SCOPES: Record<string, string> = {
   openid: "Verify your identity via OpenID Connect (user subject ID and token claims)",
   profile: "Access your profile information",
@@ -8,6 +32,8 @@ export const STANDARD_SCOPES: Record<string, string> = {
   phone: "Access your phone number details",
   offline_access: "Maintain persistent access via refresh tokens without re-authenticating",
 };
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function validateAuthorizationId(authorizationId: string | null | undefined): {
   valid: boolean;
@@ -52,18 +78,52 @@ export function validateOwnerAccess(userId: string | null | undefined): {
   return { isOwner: true };
 }
 
+/**
+ * Hardened redirect validator:
+ * Rejects external protocols, protocol-relative paths (// or /\), backslashes,
+ * and URL-encoded bypasses. Guarantees that only safe relative internal paths are returned.
+ */
 export function validateSafeRedirect(redirectParam: string | null | undefined, fallback: string = "/"): string {
   if (!redirectParam || typeof redirectParam !== "string") {
     return fallback;
   }
 
   const trimmed = redirectParam.trim();
-  // Must be a relative path starting with / and not // (protocol-relative), and cannot contain ://
-  if (trimmed.startsWith("/") && !trimmed.startsWith("//") && !trimmed.includes("://")) {
-    return trimmed;
+
+  // Reject protocol-relative, backslash, control chars, and encoded bypasses
+  if (
+    !trimmed.startsWith("/") ||
+    trimmed.startsWith("//") ||
+    trimmed.startsWith("/\\") ||
+    trimmed.includes("\\") ||
+    /%5c|%2f|%00/i.test(trimmed)
+  ) {
+    return fallback;
   }
 
-  return fallback;
+  try {
+    const parsed = new URL(trimmed, "http://localhost");
+    // Origin must match dummy origin exactly
+    if (parsed.origin !== "http://localhost") {
+      return fallback;
+    }
+    // Pathname must be relative and not contain escaping characters
+    if (
+      !parsed.pathname.startsWith("/") ||
+      parsed.pathname.startsWith("//") ||
+      parsed.pathname.includes("\\")
+    ) {
+      return fallback;
+    }
+    // Scheme must be http:
+    if (parsed.protocol !== "http:") {
+      return fallback;
+    }
+
+    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch {
+    return fallback;
+  }
 }
 
 export function parseScopes(scopeString: string | null | undefined): string[] {
@@ -75,3 +135,91 @@ export function parseScopes(scopeString: string | null | undefined): string[] {
   return parts.length > 0 ? parts : ["openid"];
 }
 
+export type ClientTrustResult =
+  | {
+      trusted: true;
+      connector: "grok" | "cursor";
+      isKnownStatic: boolean;
+      clientName: string;
+      clientId: string;
+      redirectUri: string;
+    }
+  | {
+      trusted: false;
+      reason: string;
+      isKnownStatic?: boolean;
+      connector?: "grok" | "cursor" | "untrusted";
+      clientId?: string;
+      redirectUri?: string;
+    };
+
+/**
+ * Strict OAuth Client verification:
+ * Enforces exact registered Grok and Cursor callback URIs and rejects unknown or untrusted clients.
+ */
+export function validateOAuthClient(
+  client: { id: string; name?: string } | null | undefined,
+  redirectUri: string | null | undefined
+): ClientTrustResult {
+  if (!client || !client.id || !UUID_REGEX.test(client.id)) {
+    return {
+      trusted: false,
+      reason: "Invalid or missing OAuth client identifier. Must be a valid UUID.",
+      connector: "untrusted",
+    };
+  }
+
+  if (!redirectUri || typeof redirectUri !== "string") {
+    return {
+      trusted: false,
+      reason: "Missing client redirect URI.",
+      connector: "untrusted",
+      clientId: client.id,
+    };
+  }
+
+  const trimmedRedirect = redirectUri.trim();
+
+  // Enforce exact trusted callback allowlist
+  if (!TRUSTED_REDIRECT_URIS.includes(trimmedRedirect)) {
+    return {
+      trusted: false,
+      reason: `Unauthorized callback URI '${trimmedRedirect}'. Only verified connectors (${TRUSTED_REDIRECT_URIS.join(", ")}) are permitted.`,
+      connector: "untrusted",
+      clientId: client.id,
+      redirectUri: trimmedRedirect,
+    };
+  }
+
+  const isKnownStatic = TRUSTED_STATIC_CLIENT_IDS.has(client.id);
+
+  if (trimmedRedirect === VERIFIED_GROK_CALLBACK_URI) {
+    return {
+      trusted: true,
+      connector: "grok",
+      isKnownStatic,
+      clientName: client.name || "Grok",
+      clientId: client.id,
+      redirectUri: trimmedRedirect,
+    };
+  }
+
+  if (trimmedRedirect === VERIFIED_CURSOR_CALLBACK_URI) {
+    return {
+      trusted: true,
+      connector: "cursor",
+      isKnownStatic,
+      clientName: client.name || "Cursor",
+      clientId: client.id,
+      redirectUri: trimmedRedirect,
+    };
+  }
+
+  return {
+    trusted: false,
+    reason: "Client failed verification policy.",
+    connector: "untrusted",
+    clientId: client.id,
+    redirectUri: trimmedRedirect,
+  };
+}

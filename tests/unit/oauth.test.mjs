@@ -4,10 +4,14 @@ import {
   DESIGNATED_OWNER_UUID,
   DESIGNATED_OWNER_EMAIL,
   STANDARD_SCOPES,
+  VERIFIED_GROK_CALLBACK_URI,
+  VERIFIED_CURSOR_CALLBACK_URI,
+  TRUSTED_STATIC_CLIENT_IDS,
   validateAuthorizationId,
   validateOwnerAccess,
   validateSafeRedirect,
   parseScopes,
+  validateOAuthClient,
 } from "../../src/lib/oauth-validation.ts";
 
 const VERIFIED_REDIRECT_URIS = [
@@ -139,7 +143,13 @@ test("OAuth Flow: safely preserves destination through login avoiding open redir
   // Open-redirect attempts must fall back to /
   assert.equal(validateSafeRedirect("https://evil.attacker.com"), "/");
   assert.equal(validateSafeRedirect("//evil.attacker.com/oauth"), "/");
+  assert.equal(validateSafeRedirect("///evil.attacker.com/oauth"), "/");
+  assert.equal(validateSafeRedirect("/\\evil.attacker.com/oauth"), "/");
+  assert.equal(validateSafeRedirect("\\\\evil.attacker.com/oauth"), "/");
+  assert.equal(validateSafeRedirect("/%5cevil.attacker.com"), "/");
+  assert.equal(validateSafeRedirect("/test%2fevil.attacker.com"), "/");
   assert.equal(validateSafeRedirect("javascript:alert(1)"), "/");
+  assert.equal(validateSafeRedirect("data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg=="), "/");
   assert.equal(validateSafeRedirect(""), "/");
   assert.equal(validateSafeRedirect(null), "/");
 });
@@ -186,4 +196,61 @@ test("OAuth Flow: enforces Supabase Auth response discrimination (Consent vs Aut
   const isAutoRedirect = !("authorization_id" in alreadyConsentedResponse);
   assert.equal(isAutoRedirect, true);
   assert.ok(alreadyConsentedResponse.redirect_url.startsWith("https://grok.com/"));
+});
+
+test("OAuth Client Trust: verifies intended Grok connector and rejects untrusted clients", () => {
+  // Active Grok Connector Client
+  const activeGrok = validateOAuthClient(
+    { id: "16bdb57f-c2cd-40d8-b6e1-c1a1b17e3f32", name: "Grok" },
+    VERIFIED_GROK_CALLBACK_URI
+  );
+  assert.equal(activeGrok.trusted, true);
+  assert.equal(activeGrok.connector, "grok");
+  assert.equal(activeGrok.isKnownStatic, true);
+
+  // Trial Grok Client
+  const trialGrok = validateOAuthClient(
+    { id: "67fc4ec0-f2cb-47ee-820d-b8649a08c761", name: "Job Farming Grok runtime_status trial" },
+    VERIFIED_GROK_CALLBACK_URI
+  );
+  assert.equal(trialGrok.trusted, true);
+  assert.equal(trialGrok.connector, "grok");
+  assert.equal(trialGrok.isKnownStatic, true);
+
+  // Dynamically registered Grok Client (new UUID, verified Grok callback)
+  const dynamicGrok = validateOAuthClient(
+    { id: "e1a2b3c4-d5e6-4f7a-8b9c-0d1e2f3a4b5c", name: "Grok" },
+    VERIFIED_GROK_CALLBACK_URI
+  );
+  assert.equal(dynamicGrok.trusted, true);
+  assert.equal(dynamicGrok.connector, "grok");
+  assert.equal(dynamicGrok.isKnownStatic, false);
+
+  // Cursor Connector Client
+  const cursorClient = validateOAuthClient(
+    { id: "7a493089-0500-4b0d-8a00-12140c16ac52", name: "Cursor" },
+    VERIFIED_CURSOR_CALLBACK_URI
+  );
+  assert.equal(cursorClient.trusted, true);
+  assert.equal(cursorClient.connector, "cursor");
+
+  // Rejection 1: Malicious / Unregistered callback URI
+  const maliciousCallback = validateOAuthClient(
+    { id: "16bdb57f-c2cd-40d8-b6e1-c1a1b17e3f32", name: "Grok" },
+    "https://evil.attacker.com/oauth/callback"
+  );
+  assert.equal(maliciousCallback.trusted, false);
+  assert.match(maliciousCallback.reason, /Unauthorized callback URI/);
+
+  // Rejection 2: Malformed Client UUID
+  const invalidUuidClient = validateOAuthClient(
+    { id: "not-a-valid-uuid", name: "Grok" },
+    VERIFIED_GROK_CALLBACK_URI
+  );
+  assert.equal(invalidUuidClient.trusted, false);
+  assert.match(invalidUuidClient.reason, /Must be a valid UUID/);
+
+  // Rejection 3: Null / Missing Client
+  const nullClient = validateOAuthClient(null, VERIFIED_GROK_CALLBACK_URI);
+  assert.equal(nullClient.trusted, false);
 });

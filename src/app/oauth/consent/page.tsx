@@ -24,6 +24,8 @@ import {
   STANDARD_SCOPES,
   validateAuthorizationId,
   validateOwnerAccess,
+  validateOAuthClient,
+  type ClientTrustResult,
 } from "@/lib/oauth-validation";
 import type { OAuthAuthorizationDetails } from "@supabase/supabase-js";
 
@@ -36,6 +38,7 @@ function ConsentContent() {
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [authDetails, setAuthDetails] = useState<OAuthAuthorizationDetails | null>(null);
+  const [clientTrust, setClientTrust] = useState<ClientTrustResult | null>(null);
   const [decisionCompleted, setDecisionCompleted] = useState<"approved" | "denied" | null>(null);
   const [redirectUrl, setRedirectUrl] = useState<string | null>(null);
 
@@ -107,8 +110,21 @@ function ConsentContent() {
           return;
         }
 
+        // Step 4.5: Validate client trust, callback URI, and identity policy
+        const trustResult = validateOAuthClient(data.client, data.redirect_uri);
+        if (!trustResult.trusted) {
+          if (isMounted) {
+            setErrorMessage(trustResult.reason || "Unauthorized OAuth client or callback URI.");
+            setAuthDetails(data as OAuthAuthorizationDetails);
+            setClientTrust(trustResult);
+            setLoading(false);
+          }
+          return;
+        }
+
         if (isMounted) {
           setAuthDetails(data as OAuthAuthorizationDetails);
+          setClientTrust(trustResult);
           setLoading(false);
         }
       } catch (err: any) {
@@ -128,7 +144,7 @@ function ConsentContent() {
 
   // Step 5 & 6: Explicit owner approval via Supabase Auth
   const handleApprove = async () => {
-    if (!authorizationId || submitting) return;
+    if (!authorizationId || submitting || !clientTrust || !clientTrust.trusted) return;
     setSubmitting(true);
     setErrorMessage(null);
 
@@ -286,14 +302,31 @@ function ConsentContent() {
                 <div className="p-3.5 rounded-xl border bg-card space-y-2.5">
                   <div className="flex justify-between items-center">
                     <span className="text-muted-foreground">Client Name:</span>
-                    <span className="font-semibold text-foreground text-xs">
+                    <span className="font-semibold text-foreground text-xs flex items-center gap-1.5">
                       {authDetails.client?.name || "Unknown Application"}
+                      {clientTrust?.trusted && (
+                        <Badge variant="outline" className="text-emerald-600 border-emerald-500/30 bg-emerald-500/10 text-[10px] py-0 px-1.5">
+                          {clientTrust.connector === "grok" ? "Verified Grok" : "Verified Cursor"}
+                        </Badge>
+                      )}
                     </span>
                   </div>
                   <div className="flex justify-between items-center">
                     <span className="text-muted-foreground">Client ID:</span>
                     <span className="font-mono text-[11px] text-foreground truncate max-w-xs">
                       {authDetails.client?.id || "N/A"}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-muted-foreground">Registration Status:</span>
+                    <span className="text-[11px] font-medium text-foreground">
+                      {clientTrust?.trusted && clientTrust.isKnownStatic ? (
+                        <span className="text-emerald-600 dark:text-emerald-400">Known Static Client ID</span>
+                      ) : clientTrust?.trusted ? (
+                        <span className="text-amber-600 dark:text-amber-400">Dynamic Registration (Owner Review Required)</span>
+                      ) : (
+                        <span className="text-rose-600 font-semibold">Untrusted / Disallowed Client</span>
+                      )}
                     </span>
                   </div>
                   <div className="flex justify-between items-center pt-1 border-t">
@@ -360,7 +393,7 @@ function ConsentContent() {
 
           <Button
             onClick={handleApprove}
-            disabled={loading || submitting || Boolean(decisionCompleted) || !authDetails}
+            disabled={loading || submitting || Boolean(decisionCompleted) || !authDetails || !clientTrust?.trusted}
             className="w-full sm:w-auto h-9 text-xs bg-brand-600 hover:bg-brand-700 text-white font-medium"
           >
             {submitting ? (
