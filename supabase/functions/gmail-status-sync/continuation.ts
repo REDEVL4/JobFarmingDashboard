@@ -94,10 +94,12 @@ export function resolveScanWindow(params: {
   }
   const isBacklogUnfinished =
     vResults.status === "partial_backfill" ||
+    vResults.status === "dry_run_partial_backfill" ||
     vResults.has_more_backlog === true ||
     vResults.checkpoint_advanced === false;
 
-  const latestHistoryId = bodyStartHistoryId || vResults.latest_history_id || vResults.history_id || null;
+  const snapshotHistoryId = vResults.start_history_snapshot || vResults.latest_history_id || vResults.history_id || null;
+  const latestHistoryId = bodyStartHistoryId || snapshotHistoryId;
 
   if (isBacklogUnfinished && vResults.continuation_before_epoch && vResults.continuation_after_epoch) {
     // Durable backfill continuation: scan older remaining window

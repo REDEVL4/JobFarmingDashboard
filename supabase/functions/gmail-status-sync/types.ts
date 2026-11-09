@@ -176,16 +176,26 @@ export interface SyncRunResult {
   syncStrategy?: "history" | "query_full" | "gap_reconciliation";
   startHistoryId?: string | null;
   latestHistoryId?: string | null;
+  startHistorySnapshot?: string | null;
   scanStartAt: string;
   scanEndAt: string;
   messagesFound: number;
   messagesEnqueued?: number;
   messagesExcludedSensitive?: number;
+  legacyReconciled?: number;
   messagesClassified: number;
   statusChangesConfirmed: number;
   reviewItemsQueued: number;
   duplicateMessagesSkipped: number;
   ignoredMessages: string[];
+  checkpointAdvanced: boolean;
+  hasMoreBacklog?: boolean;
+  continuation?: {
+    beforeEpoch?: number | null;
+    afterEpoch?: number | null;
+    ceilingTime?: string | null;
+    pageToken?: string | null;
+  } | null;
   errors: Array<{ code: string; detail?: string }>;
   details?: {
     proposedChanges: Array<{

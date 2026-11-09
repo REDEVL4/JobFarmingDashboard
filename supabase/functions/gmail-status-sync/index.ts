@@ -1,7 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import postgres from "npm:postgres@3.4.5";
 import { classifyRecruitmentEmail } from "./classifier.ts";
-import { matchApplicationToEmail, isMessageProcessed } from "./matcher.ts";
+import { matchApplicationToEmail } from "./matcher.ts";
 import {
   resolveScanWindow,
   computeContinuationState,
@@ -348,8 +348,10 @@ Deno.serve(async (req) => {
     const syncResult = await executeGmailSync({
       token,
       startHistoryId: scanWindow.startHistoryId || body.start_history_id || null,
+      startHistorySnapshot: scanWindow.startHistoryId || null,
       queryAfterEpoch: scanWindow.queryAfterEpoch,
       queryBeforeEpoch: scanWindow.queryBeforeEpoch,
+      isResumingBackfill: scanWindow.isResumingBackfill,
       maxMessages,
       pageToken: body.continuation_page_token || undefined,
       gapReconciliation: gapReconcile,
@@ -378,29 +380,28 @@ Deno.serve(async (req) => {
       applied_at: r.applied_at,
     }));
 
-    const processedMessageIds = new Set<string>();
+    const processedMessageMap = new Map<string, "recruitment_review_items" | "application_events">();
     for (const r of reviewRows) {
-      if (r.message_id) processedMessageIds.add(r.message_id);
+      if (r.message_id) processedMessageMap.set(r.message_id, "recruitment_review_items");
     }
     for (const r of eventRows) {
       if (r.external_event_id) {
         const parts = r.external_event_id.split(":");
         const id = parts[parts.length - 1];
-        if (id) processedMessageIds.add(id);
+        if (id) processedMessageMap.set(id, "application_events");
       }
     }
 
     // 9. Fetch full messages with bounded retry and preserve failed retrievals
+    // Invariant (Issue 4): Never silently drop previously processed messages from ingestion inventory.
+    // Reconcile legacy processed messages into the queue with explicit provenance.
     const fetchedMessages: any[] = [];
     let duplicateCount = 0;
+    let legacyReconciledCount = 0;
     const queueItems: GmailQueueItem[] = [];
     const excludedSensitiveItems: Array<{ messageId: string; reason: string }> = [];
 
     for (const item of rawMessageHeaders) {
-      if (isMessageProcessed(item.id, processedMessageIds)) {
-        duplicateCount++;
-        continue;
-      }
       try {
         const msg = await fetchMessageWithRetry(token, item.id);
         fetchedMessages.push(msg);
@@ -541,6 +542,37 @@ Deno.serve(async (req) => {
           exclusion_reason: sensitiveCheck.reason,
         });
         // Never process sensitive security emails for recruitment updates
+        continue;
+      }
+
+      // Invariant (Issue 4): Preserve existing application history and idempotency!
+      // Reconcile legacy processed messages into the queue with explicit provenance
+      // rather than silently dropping email IDs from ingestion.
+      if (processedMessageMap.has(msgId)) {
+        const legacySource = processedMessageMap.get(msgId)!;
+        legacyReconciledCount++;
+        queueItems.push({
+          owner_id: OWNER_UUID,
+          mailbox: OWNER_EMAIL,
+          message_id: msgId,
+          thread_id: msg.threadId || msgId,
+          message_timestamp: internalDate > 0 ? new Date(internalDate).toISOString() : new Date().toISOString(),
+          history_id: msg.historyId ? String(msg.historyId) : (latestHistoryId || null),
+          processing_status: "completed",
+          content_hash: contentHash,
+          subject_clean: sanitizeSubject(subject),
+          sender_clean: sanitizeSender(from),
+          attempt_count: 0,
+          max_attempts: 5,
+          review_status: legacySource === "recruitment_review_items" ? "requires_review" : "auto_approved",
+          evidence_references: {
+            legacy_processed: true,
+            legacy_source: legacySource,
+            reconciled_at: new Date().toISOString(),
+          },
+        });
+        // Legacy message already processed into recruitment_review_items or application_events.
+        // Do not generate duplicate proposedChanges or proposedReviews.
         continue;
       }
 
@@ -696,8 +728,10 @@ Deno.serve(async (req) => {
         excluded_sensitive_details: excludedSensitiveItems,
         proposed_changes_count: proposedChanges.length,
         proposed_reviews_count: proposedReviews.length,
+        legacy_reconciled_count: legacyReconciledCount,
         duplicate_messages_count: duplicateCount,
         ignored_messages_count: ignoredMessageIds.length,
+        start_history_snapshot: syncResult.startHistorySnapshot || null,
         proposed_changes: proposedChanges,
         gate_locked_reason: gateLockedReason,
       };
@@ -709,7 +743,7 @@ Deno.serve(async (req) => {
           errors, verification_results
         ) values (
           ${runId}::uuid, ${BOT_NAME}, ${startedAt}::timestamptz, ${completedAt}::timestamptz,
-          ${0}, ${0}, ${duplicateCount + ignoredMessageIds.length},
+          ${0}, ${0}, ${duplicateCount + ignoredMessageIds.length + legacyReconciledCount},
           ${sql.json([])},
           ${sql.json(dryRunVerificationResults)}
         )
@@ -730,11 +764,13 @@ Deno.serve(async (req) => {
         syncStrategy: syncResult.strategy,
         startHistoryId: scanWindow.startHistoryId || null,
         latestHistoryId: latestHistoryId || null,
+        startHistorySnapshot: syncResult.startHistorySnapshot || null,
         scanStartAt: new Date(scanWindow.queryAfterEpoch * 1000).toISOString(),
         scanEndAt: completedAt,
         messagesFound: rawMessageHeaders.length,
         messagesEnqueued: 0, // Strictly 0 committed queue rows
         messagesExcludedSensitive: excludedSensitiveItems.length,
+        legacyReconciled: legacyReconciledCount,
         messagesClassified: proposedChanges.length + proposedReviews.length,
         statusChangesConfirmed: 0,
         reviewItemsQueued: 0,
@@ -786,25 +822,57 @@ Deno.serve(async (req) => {
       actualCommittedQueueRows = queueEnqueueResult.newlyEnqueued;
 
       // 2. Advance dedicated sync cursor (ONLY in this transaction!)
-      await tx`
-        insert into jobbot.sync_cursors (
-          owner_id, source_key, last_success_at, last_observed_at,
-          last_history_id, overlap_minutes, initial_lookback_hours,
-          consecutive_failures, updated_at
-        ) values (
-          ${OWNER_UUID}::uuid, 'gmail_status_ingestion',
-          ${completedAt}::timestamptz,
-          ${maxInternalDate > 0 ? new Date(maxInternalDate).toISOString() : completedAt}::timestamptz,
-          ${latestHistoryId || null},
-          ${OVERLAP_MINUTES}, 72, 0, now()
-        )
-        on conflict (owner_id, source_key) do update
-        set last_success_at = ${completedAt}::timestamptz,
-            last_observed_at = coalesce(${maxInternalDate > 0 ? new Date(maxInternalDate).toISOString() : null}::timestamptz, jobbot.sync_cursors.last_observed_at),
-            last_history_id = coalesce(${latestHistoryId || null}, jobbot.sync_cursors.last_history_id),
-            consecutive_failures = 0,
-            updated_at = now()
-      `;
+      // Invariant (Issue 1): NEVER advance completed ingestion cursor beyond unprocessed Gmail records.
+      // Invariant (Issue 1 & 2): When all pages complete, advance to safe snapshot captured before discovery.
+      // Invariant (Issue 1 & 3): When backlog remains, NEVER advance last_success_at! For history sync, only
+      // advance last_history_id to safe fully-consumed record boundary. For query_full backfill, do NOT advance last_history_id.
+      if (continuation.checkpointAdvanced) {
+        const effectiveCheckpointTime = continuation.effectiveCheckpointTime || completedAt;
+        const effectiveHistoryId = syncResult.startHistorySnapshot || latestHistoryId || null;
+
+        await tx`
+          insert into jobbot.sync_cursors (
+            owner_id, source_key, last_success_at, last_observed_at,
+            last_history_id, overlap_minutes, initial_lookback_hours,
+            consecutive_failures, updated_at
+          ) values (
+            ${OWNER_UUID}::uuid, 'gmail_status_ingestion',
+            ${effectiveCheckpointTime}::timestamptz,
+            ${maxInternalDate > 0 ? new Date(maxInternalDate).toISOString() : completedAt}::timestamptz,
+            ${effectiveHistoryId},
+            ${OVERLAP_MINUTES}, 72, 0, now()
+          )
+          on conflict (owner_id, source_key) do update
+          set last_success_at = ${effectiveCheckpointTime}::timestamptz,
+              last_observed_at = coalesce(${maxInternalDate > 0 ? new Date(maxInternalDate).toISOString() : null}::timestamptz, jobbot.sync_cursors.last_observed_at),
+              last_history_id = coalesce(${effectiveHistoryId}, jobbot.sync_cursors.last_history_id),
+              consecutive_failures = 0,
+              updated_at = now()
+        `;
+      } else {
+        const safePartialHistoryId = syncResult.strategy === "history"
+          ? (syncResult.latestHistoryId || null)
+          : null;
+
+        await tx`
+          insert into jobbot.sync_cursors (
+            owner_id, source_key, last_success_at, last_observed_at,
+            last_history_id, overlap_minutes, initial_lookback_hours,
+            consecutive_failures, updated_at
+          ) values (
+            ${OWNER_UUID}::uuid, 'gmail_status_ingestion',
+            null,
+            ${maxInternalDate > 0 ? new Date(maxInternalDate).toISOString() : null}::timestamptz,
+            ${safePartialHistoryId},
+            ${OVERLAP_MINUTES}, 72, 0, now()
+          )
+          on conflict (owner_id, source_key) do update
+          set last_observed_at = coalesce(${maxInternalDate > 0 ? new Date(maxInternalDate).toISOString() : null}::timestamptz, jobbot.sync_cursors.last_observed_at),
+              last_history_id = coalesce(${safePartialHistoryId}, jobbot.sync_cursors.last_history_id),
+              consecutive_failures = 0,
+              updated_at = now()
+        `;
+      }
 
       // 3. Write ingestion sync log
       const liveVerificationResults = {
@@ -815,6 +883,7 @@ Deno.serve(async (req) => {
         sync_strategy: syncResult.strategy,
         start_history_id: scanWindow.startHistoryId || null,
         latest_history_id: latestHistoryId || null,
+        start_history_snapshot: syncResult.startHistorySnapshot || null,
         history_expired_recovered: syncResult.historyExpiredRecovered || false,
         run_kind: scanWindow.isResumingBackfill
           ? "backfill_continuation"
@@ -823,7 +892,7 @@ Deno.serve(async (req) => {
         last_gmail_scan_at: completedAt,
         has_more_backlog: continuation.hasMoreBacklog,
         all_pages_complete: continuation.allPagesComplete,
-        checkpoint_advanced: true,
+        checkpoint_advanced: continuation.checkpointAdvanced,
         continuation_before_epoch: continuation.nextContinuationBeforeEpoch,
         continuation_after_epoch: continuation.nextContinuationAfterEpoch,
         continuation_ceiling_time: continuation.nextContinuationCeilingTime,
@@ -832,10 +901,11 @@ Deno.serve(async (req) => {
         messages_enqueued: actualCommittedQueueRows,
         messages_excluded_sensitive: queueEnqueueResult.excludedSensitive,
         duplicates_skipped: queueEnqueueResult.duplicatesSkipped,
+        legacy_reconciled_count: legacyReconciledCount,
         pending_fetch_count: queueItems.filter((q) => q.processing_status === "pending_fetch").length,
         updated_count: 0,
         statusChangesConfirmed: 0,
-        latest_successful_ingestion_at: completedAt,
+        latest_successful_ingestion_at: continuation.checkpointAdvanced ? completedAt : (cursorRow?.last_success_at || null),
       };
 
       await tx`
@@ -846,7 +916,7 @@ Deno.serve(async (req) => {
         ) values (
           ${runId}::uuid, ${BOT_NAME}, ${startedAt}::timestamptz, ${completedAt}::timestamptz,
           ${actualCommittedQueueRows}, 0,
-          ${queueEnqueueResult.duplicatesSkipped + queueEnqueueResult.excludedSensitive},
+          ${queueEnqueueResult.duplicatesSkipped + queueEnqueueResult.excludedSensitive + legacyReconciledCount},
           ${sql.json([])},
           ${sql.json(liveVerificationResults)}
         )
@@ -861,15 +931,17 @@ Deno.serve(async (req) => {
       syncStrategy: syncResult.strategy,
       startHistoryId: scanWindow.startHistoryId || null,
       latestHistoryId: latestHistoryId || null,
+      startHistorySnapshot: syncResult.startHistorySnapshot || null,
       messagesFound: rawMessageHeaders.length,
       messagesEnqueued: actualCommittedQueueRows,
       messagesExcludedSensitive: queueEnqueueResult.excludedSensitive,
+      legacyReconciled: legacyReconciledCount,
       duplicatesSkipped: queueEnqueueResult.duplicatesSkipped,
       updated: 0,
       statusChangesConfirmed: 0,
       reviewsQueued: 0,
       hasMoreBacklog: continuation.hasMoreBacklog,
-      checkpointAdvanced: true,
+      checkpointAdvanced: continuation.checkpointAdvanced,
       continuation: continuation.hasMoreBacklog ? {
         beforeEpoch: continuation.nextContinuationBeforeEpoch,
         afterEpoch: continuation.nextContinuationAfterEpoch,

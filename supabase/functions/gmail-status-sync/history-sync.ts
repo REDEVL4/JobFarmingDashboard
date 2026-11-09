@@ -44,6 +44,7 @@ export interface HistorySyncResult {
   strategy: "history" | "query_full" | "gap_reconciliation";
   messages: DiscoveredMessageHeader[];
   latestHistoryId: string | null;
+  startHistorySnapshot?: string | null;
   hasMoreBacklog: boolean;
   nextPageToken: string | null;
   historyExpiredRecovered?: boolean;
@@ -199,7 +200,7 @@ export async function syncViaGmailHistory(params: {
     messages: Array.from(discoveredMap.values()),
     latestHistoryId: resolvedLatestHistoryId,
     hasMoreBacklog,
-    nextPageToken: reachedLimit ? null : (currentPageToken || null),
+    nextPageToken: null, // Invariant (Issue 3): Do not reuse incompatible pagination tokens across distinct history IDs
   };
 }
 
@@ -214,13 +215,20 @@ export async function syncViaGmailFullSearch(params: {
   queryBeforeEpoch?: number | null;
   maxMessages: number;
   pageToken?: string;
+  startHistorySnapshot?: string | null;
 }): Promise<{
   messages: DiscoveredMessageHeader[];
   latestHistoryId: string | null;
+  startHistorySnapshot: string | null;
   hasMoreBacklog: boolean;
   nextPageToken: string | null;
 }> {
-  const { token, queryAfterEpoch, queryBeforeEpoch, maxMessages, pageToken } = params;
+  const { token, queryAfterEpoch, queryBeforeEpoch, maxMessages, pageToken, startHistorySnapshot } = params;
+
+  // 1. Capture starting history snapshot BEFORE full discovery to eliminate race conditions (Issue 2).
+  // Any email arriving during or after the full scan will have historyId > snapshotHistoryId
+  // and will be captured by the subsequent incremental History API poll.
+  const snapshotHistoryId = startHistorySnapshot || (await getMailboxHistoryId(token));
 
   // Build loss-resistant search query without restrictive label:INBOX OR label:SENT
   // and without hardcoded sender exclusions (filtering happens post-discovery)
@@ -258,16 +266,17 @@ export async function syncViaGmailFullSearch(params: {
     }
   } while (currentPageToken);
 
-  // Retrieve current mailbox historyId to establish new incremental checkpoint
-  const currentHistoryId = await getMailboxHistoryId(token);
-
   const hasMoreBacklog = Boolean(currentPageToken) || reachedLimit;
 
+  // Invariant (Issue 1 & 2): If the backfill is incomplete, latestHistoryId must NOT advance
+  // past unprocessed messages. When all pages are complete, latestHistoryId is set to the
+  // snapshot captured BEFORE discovery started.
   return {
     messages: discovered,
-    latestHistoryId: currentHistoryId,
+    latestHistoryId: hasMoreBacklog ? null : snapshotHistoryId,
+    startHistorySnapshot: snapshotHistoryId,
     hasMoreBacklog,
-    nextPageToken: currentPageToken || null,
+    nextPageToken: hasMoreBacklog ? (currentPageToken || null) : null,
   };
 }
 
@@ -331,8 +340,10 @@ export async function fetchMessageWithRetry(
 export async function executeGmailSync(params: {
   token: string;
   startHistoryId?: string | null;
+  startHistorySnapshot?: string | null;
   queryAfterEpoch: number;
   queryBeforeEpoch?: number | null;
+  isResumingBackfill?: boolean;
   maxMessages: number;
   pageToken?: string;
   gapReconciliation?: boolean;
@@ -340,32 +351,38 @@ export async function executeGmailSync(params: {
   const {
     token,
     startHistoryId,
+    startHistorySnapshot,
     queryAfterEpoch,
     queryBeforeEpoch,
+    isResumingBackfill,
     maxMessages,
     pageToken,
     gapReconciliation,
   } = params;
 
-  // 1. Force full search on gap reconciliation
-  if (gapReconciliation) {
+  // 1. Force full search on gap reconciliation OR when resuming an incomplete backfill
+  // Invariant (Issue 3): Do not switch prematurely to History API polling while older messages
+  // in an outstanding full-search backfill window remain unprocessed!
+  if (gapReconciliation || isResumingBackfill) {
     const searchRes = await syncViaGmailFullSearch({
       token,
       queryAfterEpoch,
       queryBeforeEpoch,
       maxMessages,
       pageToken,
+      startHistorySnapshot: startHistorySnapshot || startHistoryId || null,
     });
     return {
-      strategy: "gap_reconciliation",
+      strategy: gapReconciliation ? "gap_reconciliation" : "query_full",
       messages: searchRes.messages,
       latestHistoryId: searchRes.latestHistoryId,
+      startHistorySnapshot: searchRes.startHistorySnapshot,
       hasMoreBacklog: searchRes.hasMoreBacklog,
       nextPageToken: searchRes.nextPageToken,
     };
   }
 
-  // 2. Try History API if a startHistoryId exists
+  // 2. Try History API if a startHistoryId exists (and not resuming a full-search backfill)
   if (startHistoryId && startHistoryId !== "0") {
     try {
       const historyRes = await syncViaGmailHistory({
@@ -399,12 +416,14 @@ export async function executeGmailSync(params: {
     queryBeforeEpoch,
     maxMessages,
     pageToken,
+    startHistorySnapshot: null,
   });
 
   return {
     strategy: "query_full",
     messages: fullRes.messages,
     latestHistoryId: fullRes.latestHistoryId,
+    startHistorySnapshot: fullRes.startHistorySnapshot,
     hasMoreBacklog: fullRes.hasMoreBacklog,
     nextPageToken: fullRes.nextPageToken,
     historyExpiredRecovered: Boolean(startHistoryId),

@@ -66,6 +66,7 @@ export async function enqueueDiscoveredMessages(
         max_attempts,
         review_status,
         exclusion_reason,
+        evidence_references,
         error_details,
         created_at,
         updated_at
@@ -84,6 +85,7 @@ export async function enqueueDiscoveredMessages(
         ${item.max_attempts || 5},
         ${item.review_status || 'pending'},
         ${item.exclusion_reason || null},
+        ${item.evidence_references ? sql.json(item.evidence_references) : null},
         ${item.error_details ? sql.json(item.error_details) : sql.json([])},
         now(),
         now()

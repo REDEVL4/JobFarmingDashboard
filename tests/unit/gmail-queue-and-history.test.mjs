@@ -40,23 +40,26 @@ function createMockQueueDb() {
 
       // 1. INSERT INTO jobbot.gmail_processing_queue
       if (rawSql.includes("insert into jobbot.gmail_processing_queue")) {
-        const [
-          owner_id,
-          mailbox,
-          message_id,
-          thread_id,
-          message_timestamp,
-          history_id,
-          processing_status,
-          content_hash,
-          subject_clean,
-          sender_clean,
-          attempt_count,
-          max_attempts,
-          review_status,
-          exclusion_reason,
-          error_details,
-        ] = values;
+        let owner_id, mailbox, message_id, thread_id, message_timestamp,
+            history_id, processing_status, content_hash, subject_clean,
+            sender_clean, attempt_count, max_attempts, review_status,
+            exclusion_reason, evidence_references, error_details;
+
+        if (values.length >= 16) {
+          [
+            owner_id, mailbox, message_id, thread_id, message_timestamp,
+            history_id, processing_status, content_hash, subject_clean,
+            sender_clean, attempt_count, max_attempts, review_status,
+            exclusion_reason, evidence_references, error_details,
+          ] = values;
+        } else {
+          [
+            owner_id, mailbox, message_id, thread_id, message_timestamp,
+            history_id, processing_status, content_hash, subject_clean,
+            sender_clean, attempt_count, max_attempts, review_status,
+            exclusion_reason, error_details,
+          ] = values;
+        }
 
         // Simulate intentional failure for transaction testing
         if (message_id === "FORCE_TRANSACTION_FAIL") {
@@ -92,7 +95,7 @@ function createMockQueueDb() {
           error_details: Array.isArray(error_details) ? error_details : [],
           classification_result: null,
           proposed_application_match: null,
-          evidence_references: null,
+          evidence_references: evidence_references || null,
           created_at: new Date(),
           updated_at: new Date(),
         };
@@ -118,9 +121,9 @@ function createMockQueueDb() {
         cursors.set(key, {
           owner_id,
           source_key,
-          last_success_at: last_success_at || existing.last_success_at || null,
-          last_observed_at: last_observed_at || existing.last_observed_at || null,
-          last_history_id: last_history_id || existing.last_history_id || null,
+          last_success_at: (last_success_at !== undefined && last_success_at !== null) ? last_success_at : (existing.last_success_at || null),
+          last_observed_at: (last_observed_at !== undefined && last_observed_at !== null) ? last_observed_at : (existing.last_observed_at || null),
+          last_history_id: (last_history_id !== undefined && last_history_id !== null) ? last_history_id : (existing.last_history_id || null),
           overlap_minutes: overlap_minutes || existing.overlap_minutes || 15,
           initial_lookback_hours: initial_lookback_hours || 72,
           consecutive_failures: 0,
@@ -299,158 +302,286 @@ function createMockQueueDb() {
   return { sql, table, cursors, syncLogs, applications };
 }
 
-// -----------------------------------------------------------------------------
-// TEST 1: Diagnostic dry run creates no queue rows and advances no cursors
-// -----------------------------------------------------------------------------
-test("Test 1: Diagnostic dry run creates no queue rows and strictly reports messagesEnqueued: 0", async () => {
+// =============================================================================
+// REGRESSION SCENARIO 1: Full-search batch with 500 messages and 300-message limit
+// =============================================================================
+test("Scenario 1: Full-search batch with 500 messages and 300-message limit preserves progress without premature cursor advancement", async () => {
+  const originalFetch = globalThis.fetch;
   const { sql, table, cursors, syncLogs } = createMockQueueDb();
 
-  const proposedQueueItems = [
-    {
-      owner_id: "f2729195-5445-4272-ab85-cac5b03b0967",
-      mailbox: "govardhanreddy.vys7@gmail.com",
-      message_id: "dry_msg_1",
-      message_timestamp: new Date().toISOString(),
-      processing_status: "pending",
-      content_hash: "hash_dry_1",
-    },
-    {
-      owner_id: "f2729195-5445-4272-ab85-cac5b03b0967",
-      mailbox: "govardhanreddy.vys7@gmail.com",
-      message_id: "dry_msg_2",
-      message_timestamp: new Date().toISOString(),
-      processing_status: "pending",
-      content_hash: "hash_dry_2",
-    },
-  ];
+  // Mock Gmail API returning 500 messages across pages of 100
+  globalThis.fetch = async (url) => {
+    const urlStr = String(url);
+    if (urlStr.includes("profile")) {
+      return new Response(JSON.stringify({ historyId: "hist_snapshot_500" }), { status: 200 });
+    }
+    if (urlStr.includes("messages?")) {
+      const u = new URL(urlStr);
+      const pageToken = u.searchParams.get("pageToken") || "p1";
+      const pageNum = parseInt(pageToken.replace("p", "")) || 1;
+      const startIdx = (pageNum - 1) * 100;
+      const messages = [];
+      for (let i = 0; i < 100; i++) {
+        const msgNum = startIdx + i + 1;
+        messages.push({ id: `msg_500_${msgNum}`, threadId: `t_${msgNum}` });
+      }
+      const nextPageToken = pageNum < 5 ? `p${pageNum + 1}` : null;
+      return new Response(JSON.stringify({ messages, nextPageToken }), { status: 200 });
+    }
+    return new Response("Not found", { status: 404 });
+  };
 
-  // In diagnostic_dry_run mode:
-  // - No queue mutations are executed
-  // - No cursor mutations are executed
-  // - Diagnostic sync log is recorded
-  const dryRunCommittedEnqueued = 0; // Strictly 0
-  assert.equal(dryRunCommittedEnqueued, 0);
+  try {
+    const fullRes = await syncViaGmailFullSearch({
+      token: "mock-token",
+      queryAfterEpoch: 1731000000,
+      maxMessages: 300,
+    });
 
-  await sql`
-    insert into jobbot.sync_logs (
-      run_id, bot_name, started_at, completed_at,
-      created_count, updated_count, skipped_count,
-      errors, verification_results
-    ) values (
-      ${"run-dry-1"}, ${"Gmail Status Agent"}, ${"2026-11-09T12:00:00Z"}, ${"2026-11-09T12:01:00Z"},
-      ${0}, ${0}, ${0},
-      ${[]},
-      ${{
-        mode: "diagnostic_dry_run",
-        dry_run: true,
-        checkpoint_advanced: false,
-        messages_discovered: 2,
-        messages_enqueued: 0,
-        proposed_queue_items_count: proposedQueueItems.length,
-      }}
-    )
-  `;
+    assert.equal(fullRes.messages.length, 300, "Must discover exactly 300 messages (the max limit)");
+    assert.equal(fullRes.hasMoreBacklog, true, "Must flag backlog remaining");
+    assert.equal(fullRes.latestHistoryId, null, "latestHistoryId MUST BE NULL when backlog remains to prevent advancing cursor past unprocessed messages");
+    assert.equal(fullRes.startHistorySnapshot, "hist_snapshot_500", "Must preserve starting history snapshot");
+    assert.ok(fullRes.nextPageToken, "Must preserve continuation page token");
 
-  assert.equal(table.size, 0, "Queue table must contain zero rows in diagnostic dry run");
-  assert.equal(cursors.size, 0, "No cursors may advance in diagnostic dry run");
-  assert.equal(syncLogs.length, 1);
-  assert.equal(syncLogs[0].verificationResults.messages_enqueued, 0);
-  assert.equal(syncLogs[0].verificationResults.mode, "diagnostic_dry_run");
+    const continuation = computeContinuationState({
+      rawMessageCount: fullRes.messages.length,
+      maxMessages: 300,
+      hasRemainingPageToken: Boolean(fullRes.nextPageToken),
+      minInternalDate: 1731050000 * 1000,
+      queryAfterEpoch: 1731000000,
+      isResumingBackfill: false,
+      startedAt: "2026-11-09T12:00:00Z",
+      completedAt: "2026-11-09T12:01:00Z",
+      dryRun: false,
+    });
+
+    assert.equal(continuation.hasMoreBacklog, true);
+    assert.equal(continuation.checkpointAdvanced, false, "checkpointAdvanced MUST BE FALSE when backlog remains");
+    assert.equal(continuation.effectiveCheckpointTime, null, "effectiveCheckpointTime MUST BE NULL to prevent advancing last_success_at");
+    assert.equal(continuation.status, "partial_backfill");
+
+    // Commit the 300 messages in ingestion_only mode
+    await sql.begin(async (tx) => {
+      const enq = await enqueueDiscoveredMessages(tx, fullRes.messages.map((m, idx) => ({
+        owner_id: "f2729195-5445-4272-ab85-cac5b03b0967",
+        mailbox: "govardhanreddy.vys7@gmail.com",
+        message_id: m.id,
+        message_timestamp: new Date(1731050000 * 1000 + idx * 1000).toISOString(),
+        processing_status: "pending",
+        content_hash: `hash_${m.id}`,
+      })));
+      assert.equal(enq.newlyEnqueued, 300);
+
+      // Invariant: Because checkpointAdvanced is false, cursor last_success_at MUST NOT advance
+      if (continuation.checkpointAdvanced) {
+        await tx`
+          insert into jobbot.sync_cursors (
+            owner_id, source_key, last_success_at, last_observed_at,
+            last_history_id, overlap_minutes, initial_lookback_hours
+          ) values (
+            ${"f2729195-5445-4272-ab85-cac5b03b0967"}, ${"gmail_status_ingestion"},
+            ${"2026-11-09T12:01:00Z"}, ${"2026-11-09T12:01:00Z"},
+            ${fullRes.latestHistoryId}, ${15}, ${72}
+          )
+        `;
+      }
+    });
+
+    assert.equal(table.size, 300, "Must durably preserve all 300 enqueued messages in database");
+    assert.equal(cursors.size, 0, "Ingestion cursor MUST NOT have advanced past unprocessed messages");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
-// -----------------------------------------------------------------------------
-// TEST 2: Ingestion-only mode creates queue rows without changing application statuses
-// -----------------------------------------------------------------------------
-test("Test 2: Ingestion-only mode creates queue rows and advances cursor without modifying applications", async () => {
-  const { sql, table, cursors, syncLogs, applications } = createMockQueueDb();
+// =============================================================================
+// REGRESSION SCENARIO 2: History-based synchronization containing multiple records and pages
+// =============================================================================
+test("Scenario 2: History-based synchronization containing multiple records and pages consumes records losslessly", async () => {
+  const originalFetch = globalThis.fetch;
 
-  // Set up an application in database
-  applications.set("app-1", { id: "app-1", company: "Meta", hiring_stage: "Applied Confirmed" });
+  globalThis.fetch = async (url) => {
+    const urlStr = String(url);
+    if (urlStr.includes("history?")) {
+      const u = new URL(urlStr);
+      const startHistoryId = u.searchParams.get("startHistoryId");
+      const pageToken = u.searchParams.get("pageToken");
 
-  const queueItems = [
-    {
-      owner_id: "f2729195-5445-4272-ab85-cac5b03b0967",
-      mailbox: "govardhanreddy.vys7@gmail.com",
-      message_id: "msg_ingest_1",
-      thread_id: "t1",
-      message_timestamp: "2026-11-09T11:00:00Z",
-      processing_status: "pending",
-      content_hash: "hash_1",
-      subject_clean: "Meta Interview Request",
-      sender_clean: "recruiter@meta.com",
-    },
-    {
-      owner_id: "f2729195-5445-4272-ab85-cac5b03b0967",
-      mailbox: "govardhanreddy.vys7@gmail.com",
-      message_id: "msg_ingest_2",
-      thread_id: "t2",
-      message_timestamp: "2026-11-09T11:05:00Z",
-      processing_status: "pending",
-      content_hash: "hash_2",
-      subject_clean: "Google Application Acknowledgment",
-      sender_clean: "careers@google.com",
-    },
-  ];
+      if (startHistoryId === "1000" && !pageToken) {
+        // Page 1: records 1001, 1002 (each with 2 messages)
+        return new Response(JSON.stringify({
+          historyId: "1005",
+          history: [
+            { id: "1001", messagesAdded: [{ message: { id: "m1", threadId: "t1" } }, { message: { id: "m2", threadId: "t2" } }] },
+            { id: "1002", messagesAdded: [{ message: { id: "m3", threadId: "t3" } }, { message: { id: "m4", threadId: "t4" } }] },
+          ],
+          nextPageToken: "page_2",
+        }), { status: 200 });
+      } else if (startHistoryId === "1000" && pageToken === "page_2") {
+        // Page 2: records 1003, 1004
+        return new Response(JSON.stringify({
+          historyId: "1005",
+          history: [
+            { id: "1003", messagesAdded: [{ message: { id: "m5", threadId: "t5" } }] },
+            { id: "1004", messagesAdded: [{ message: { id: "m6", threadId: "t6" } }] },
+          ],
+          nextPageToken: null,
+        }), { status: 200 });
+      } else if (startHistoryId === "1002") {
+        // Resumed run starting after record 1002
+        return new Response(JSON.stringify({
+          historyId: "1005",
+          history: [
+            { id: "1003", messagesAdded: [{ message: { id: "m5", threadId: "t5" } }] },
+            { id: "1004", messagesAdded: [{ message: { id: "m6", threadId: "t6" } }] },
+          ],
+          nextPageToken: null,
+        }), { status: 200 });
+      }
+    }
+    return new Response("Not found", { status: 404 });
+  };
 
-  let actualCommittedQueueRows = 0;
-  await sql.begin(async (tx) => {
-    const enqueueResult = await enqueueDiscoveredMessages(tx, queueItems);
-    actualCommittedQueueRows = enqueueResult.newlyEnqueued;
+  try {
+    // Limit to 3 messages: Record 1001 (2 msgs) + Record 1002 (2 msgs) = 4 msgs.
+    // Record 1002 is completed entirely; stops before record 1003.
+    const run1 = await syncViaGmailHistory({
+      token: "mock-token",
+      startHistoryId: "1000",
+      maxMessages: 3,
+    });
 
-    // Advance ingestion cursor atomically
-    await tx`
-      insert into jobbot.sync_cursors (
-        owner_id, source_key, last_success_at, last_observed_at,
-        last_history_id, overlap_minutes, initial_lookback_hours
-      ) values (
-        ${"f2729195-5445-4272-ab85-cac5b03b0967"}, ${"gmail_status_ingestion"},
-        ${"2026-11-09T11:10:00Z"}, ${"2026-11-09T11:05:00Z"},
-        ${"hist_888999"}, ${15}, ${72}
-      )
-    `;
+    assert.equal(run1.messages.length, 4, "Must complete record 1002 entirely before breaking");
+    assert.equal(run1.hasMoreBacklog, true, "Must flag backlog remaining");
+    assert.equal(run1.latestHistoryId, "1002", "Checkpoint must be safe fully-consumed record 1002, NOT premature 1005");
+    assert.equal(run1.nextPageToken, null, "Must NOT reuse incompatible pagination token across new historyId");
 
-    // Record ingestion sync log (created_count = actualCommittedQueueRows, updated_count = 0)
-    await tx`
-      insert into jobbot.sync_logs (
-        run_id, bot_name, started_at, completed_at,
-        created_count, updated_count, skipped_count,
-        errors, verification_results
-      ) values (
-        ${"run-ingest-1"}, ${"Gmail Status Agent"}, ${"2026-11-09T11:00:00Z"}, ${"2026-11-09T11:10:00Z"},
-        ${actualCommittedQueueRows}, ${0}, ${0},
-        ${[]},
-        ${{
-          mode: "ingestion_only",
-          dry_run: false,
-          messages_enqueued: actualCommittedQueueRows,
-          updated_count: 0,
-        }}
-      )
-    `;
-  });
+    // Pass 2: Resume with startHistoryId: "1002"
+    const run2 = await syncViaGmailHistory({
+      token: "mock-token",
+      startHistoryId: run1.latestHistoryId,
+      maxMessages: 10,
+    });
 
-  // Verification
-  assert.equal(actualCommittedQueueRows, 2, "Must commit exactly 2 queue rows");
-  assert.equal(table.size, 2, "Queue table has 2 rows");
-  assert.equal(cursors.size, 1, "Cursor must advance");
-  const cursorRecord = cursors.get("f2729195-5445-4272-ab85-cac5b03b0967:gmail_status_ingestion");
-  assert.equal(cursorRecord.last_history_id, "hist_888999");
-  assert.equal(syncLogs[0].createdCount, 2);
-  assert.equal(syncLogs[0].updatedCount, 0);
+    assert.equal(run2.messages.length, 2, "Pass 2 fetches remaining records 1003 and 1004");
+    assert.equal(run2.hasMoreBacklog, false, "Backlog exhausted");
+    assert.equal(run2.latestHistoryId, "1005", "Final checkpoint advances to 1005");
 
-  // Application must NOT have changed
-  assert.equal(applications.get("app-1").hiring_stage, "Applied Confirmed", "Job application must remain untouched in ingestion_only mode");
+    const allDiscoveredIds = [...run1.messages.map((m) => m.id), ...run2.messages.map((m) => m.id)];
+    assert.deepEqual(allDiscoveredIds, ["m1", "m2", "m3", "m4", "m5", "m6"], "Zero messages lost across multi-record pagination!");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
-// -----------------------------------------------------------------------------
-// TEST 3: A failed queue insertion prevents cursor advancement (atomic rollback)
-// -----------------------------------------------------------------------------
-test("Test 3: A database error during queue insertion rolls back transaction and prevents cursor advancement", async () => {
+// =============================================================================
+// REGRESSION SCENARIO 3: New email arriving during full search
+// =============================================================================
+test("Scenario 3: New email arriving during full search is captured safely without being skipped", async () => {
+  const originalFetch = globalThis.fetch;
   const { sql, table, cursors } = createMockQueueDb();
+
+  let mailboxHistoryId = "70000"; // Starting history snapshot before search
+
+  globalThis.fetch = async (url) => {
+    const urlStr = String(url);
+    if (urlStr.includes("profile")) {
+      return new Response(JSON.stringify({ historyId: mailboxHistoryId }), { status: 200 });
+    }
+    if (urlStr.includes("messages?")) {
+      // While the search is executing, a new email arrives in mailbox!
+      mailboxHistoryId = "70010"; // Mailbox history advances
+      return new Response(JSON.stringify({
+        messages: [
+          { id: "msg_existing_1", threadId: "t1" },
+          { id: "msg_existing_2", threadId: "t2" },
+        ],
+        nextPageToken: null,
+      }), { status: 200 });
+    }
+    if (urlStr.includes("history?")) {
+      const u = new URL(urlStr);
+      const startHistoryId = u.searchParams.get("startHistoryId");
+      if (startHistoryId === "70000") {
+        // Incremental poll starting from safe snapshot 70000 returns the new email that arrived during search!
+        return new Response(JSON.stringify({
+          historyId: "70010",
+          history: [
+            {
+              id: "70005",
+              messagesAdded: [{ message: { id: "msg_arrived_during_search", threadId: "t_new" } }],
+            },
+          ],
+          nextPageToken: null,
+        }), { status: 200 });
+      }
+    }
+    return new Response("Not found", { status: 404 });
+  };
+
+  try {
+    // 1. Initial full search run
+    const searchRes = await syncViaGmailFullSearch({
+      token: "mock-token",
+      queryAfterEpoch: 1731000000,
+      maxMessages: 100,
+    });
+
+    assert.equal(searchRes.startHistorySnapshot, "70000", "Starting snapshot MUST be captured BEFORE search started");
+    assert.equal(searchRes.latestHistoryId, "70000", "Safe checkpoint to persist is the starting snapshot 70000, NOT the post-scan 70010");
+
+    // Commit full search results and cursor
+    await sql.begin(async (tx) => {
+      await enqueueDiscoveredMessages(tx, searchRes.messages.map((m) => ({
+        owner_id: "f2729195-5445-4272-ab85-cac5b03b0967",
+        mailbox: "govardhanreddy.vys7@gmail.com",
+        message_id: m.id,
+        message_timestamp: new Date().toISOString(),
+        processing_status: "pending",
+        content_hash: `hash_${m.id}`,
+      })));
+
+      await tx`
+        insert into jobbot.sync_cursors (
+          owner_id, source_key, last_success_at, last_observed_at,
+          last_history_id, overlap_minutes, initial_lookback_hours
+        ) values (
+          ${"f2729195-5445-4272-ab85-cac5b03b0967"}, ${"gmail_status_ingestion"},
+          ${"2026-11-09T12:00:00Z"}, ${"2026-11-09T12:00:00Z"},
+          ${searchRes.latestHistoryId}, ${15}, ${72}
+        )
+      `;
+    });
+
+    // 2. Next incremental run reads cursor (70000) and executes incremental history sync
+    const cursor = cursors.get("f2729195-5445-4272-ab85-cac5b03b0967:gmail_status_ingestion");
+    assert.equal(cursor.last_history_id, "70000");
+
+    const incrementalSync = await executeGmailSync({
+      token: "mock-token",
+      startHistoryId: cursor.last_history_id,
+      queryAfterEpoch: 1731000000,
+      maxMessages: 100,
+    });
+
+    assert.equal(incrementalSync.strategy, "history");
+    assert.equal(incrementalSync.messages.length, 1);
+    assert.equal(incrementalSync.messages[0].id, "msg_arrived_during_search", "Must capture the email that arrived during the full search!");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// =============================================================================
+// REGRESSION SCENARIO 4: Cursor rollback after queue insertion failure
+// =============================================================================
+test("Scenario 4: Cursor rollback after queue insertion failure preserves previous cursor and leaves 0 queue rows", async () => {
+  const { sql, table, cursors, syncLogs } = createMockQueueDb();
 
   // Set initial cursor state
   cursors.set("f2729195-5445-4272-ab85-cac5b03b0967:gmail_status_ingestion", {
-    last_history_id: "hist_initial_100",
+    last_history_id: "hist_initial_safe_100",
     last_success_at: "2026-11-09T10:00:00Z",
   });
 
@@ -476,7 +607,7 @@ test("Test 3: A database error during queue insertion rolls back transaction and
   let transactionFailed = false;
   try {
     await sql.begin(async (tx) => {
-      // 1. Attempt queue insert (will throw on second item)
+      // 1. Attempt queue insert (throws on second item)
       await enqueueDiscoveredMessages(tx, badItems);
 
       // 2. Cursor advancement (should never be reached or committed)
@@ -498,13 +629,240 @@ test("Test 3: A database error during queue insertion rolls back transaction and
   assert.equal(transactionFailed, true, "Transaction must fail and throw");
   assert.equal(table.size, 0, "No queue rows may be committed when transaction aborts");
   const cursorRecord = cursors.get("f2729195-5445-4272-ab85-cac5b03b0967:gmail_status_ingestion");
-  assert.equal(cursorRecord.last_history_id, "hist_initial_100", "Cursor MUST NOT advance when queue insert fails");
+  assert.equal(cursorRecord.last_history_id, "hist_initial_safe_100", "Cursor MUST NOT advance when queue insert fails");
+  assert.equal(cursorRecord.last_success_at, "2026-11-09T10:00:00Z", "Timestamp MUST NOT advance");
 });
 
-// -----------------------------------------------------------------------------
-// TEST 4: Gmail fetch failures remain retryable
-// -----------------------------------------------------------------------------
-test("Test 4: Transient 429/5xx errors are preserved as pending_fetch; permanent 404/410 marked as excluded", async () => {
+// =============================================================================
+// REGRESSION SCENARIO 5: Successful automatic continuation after an incomplete hourly run
+// =============================================================================
+test("Scenario 5: Successful automatic continuation resumes full search window unattended without manual parameters", async () => {
+  const originalFetch = globalThis.fetch;
+  const { sql, table, cursors, syncLogs } = createMockQueueDb();
+
+  // Seed previous incomplete production sync log in database
+  syncLogs.push({
+    run_id: "prev-partial-run-1",
+    bot_name: "Gmail Status Agent",
+    started_at: "2026-11-09T11:00:00Z",
+    completed_at: "2026-11-09T11:05:00Z",
+    created_count: 200,
+    updated_count: 0,
+    skipped_count: 0,
+    errors: [],
+    verification_results: {
+      status: "partial_backfill",
+      mode: "ingestion_only",
+      dry_run: false,
+      has_more_backlog: true,
+      checkpoint_advanced: false,
+      continuation_before_epoch: 1731050000,
+      continuation_after_epoch: 1731000000,
+      continuation_ceiling_time: "2026-11-09T11:00:00Z",
+      start_history_snapshot: "snapshot_h888",
+    },
+  });
+
+  // Next run: unattended invocation (no manual body parameters)
+  const latestProdLog = syncLogs[0];
+  const scanWindow = resolveScanWindow({
+    latestProductionLog: latestProdLog,
+    cursorRecord: null,
+    gapReconcile: false,
+    lastVerifiedCheckpoint: "2026-11-08T22:47:41Z",
+    overlapMinutes: 15,
+  });
+
+  assert.equal(scanWindow.isResumingBackfill, true, "Must automatically identify unfinished backfill");
+  assert.equal(scanWindow.queryAfterEpoch, 1731000000);
+  assert.equal(scanWindow.queryBeforeEpoch, 1731050000);
+  assert.equal(scanWindow.startHistoryId, "snapshot_h888");
+
+  // Mock Gmail API for remaining window
+  globalThis.fetch = async (url) => {
+    const urlStr = String(url);
+    if (urlStr.includes("messages?")) {
+      const u = new URL(urlStr);
+      const q = u.searchParams.get("q");
+      assert.ok(q.includes("after:1731000000"), "Must query the exact outstanding after epoch");
+      assert.ok(q.includes("before:1731050000"), "Must query the exact outstanding before epoch");
+      return new Response(JSON.stringify({
+        messages: [{ id: "resumed_msg_1", threadId: "t1" }, { id: "resumed_msg_2", threadId: "t2" }],
+        nextPageToken: null,
+      }), { status: 200 });
+    }
+    return new Response("Not found", { status: 404 });
+  };
+
+  try {
+    const syncRes = await executeGmailSync({
+      token: "mock-token",
+      startHistoryId: scanWindow.startHistoryId,
+      startHistorySnapshot: scanWindow.startHistoryId,
+      queryAfterEpoch: scanWindow.queryAfterEpoch,
+      queryBeforeEpoch: scanWindow.queryBeforeEpoch,
+      isResumingBackfill: scanWindow.isResumingBackfill,
+      maxMessages: 300,
+    });
+
+    assert.equal(syncRes.strategy, "query_full", "Must continue full search, NOT switch prematurely to History API");
+    assert.equal(syncRes.hasMoreBacklog, false, "All remaining messages consumed");
+    assert.equal(syncRes.latestHistoryId, "snapshot_h888", "Latest historyId advances to snapshot once window is complete");
+
+    const continuation = computeContinuationState({
+      rawMessageCount: syncRes.messages.length,
+      maxMessages: 300,
+      hasRemainingPageToken: false,
+      queryAfterEpoch: scanWindow.queryAfterEpoch,
+      isResumingBackfill: true,
+      continuationCeilingTime: scanWindow.continuationCeilingTime,
+      startedAt: "2026-11-09T12:00:00Z",
+      completedAt: "2026-11-09T12:02:00Z",
+      dryRun: false,
+    });
+
+    assert.equal(continuation.checkpointAdvanced, true, "Checkpoint now advances after backfill completes");
+    assert.equal(continuation.effectiveCheckpointTime, "2026-11-09T11:00:00Z", "Advances to original ceiling time");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// =============================================================================
+// REGRESSION SCENARIO 6: Exact boundary where a batch contains the configured maximum
+// =============================================================================
+test("Scenario 6: Exact boundary where batch contains exactly the configured maximum (300 messages)", async () => {
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (url) => {
+    const urlStr = String(url);
+    if (urlStr.includes("profile")) {
+      return new Response(JSON.stringify({ historyId: "hist_boundary_300" }), { status: 200 });
+    }
+    if (urlStr.includes("messages?")) {
+      const u = new URL(urlStr);
+      const q = u.searchParams.get("q") || "";
+      if (q.includes("before:")) {
+        // Subsequent check of remaining window returns 0 messages
+        return new Response(JSON.stringify({ messages: [], nextPageToken: null }), { status: 200 });
+      }
+      // First scan returns exactly 300 messages with no further page token
+      const msgs = Array.from({ length: 300 }, (_, i) => ({ id: `msg_exact_${i + 1}`, threadId: `t_${i + 1}` }));
+      return new Response(JSON.stringify({ messages: msgs, nextPageToken: null }), { status: 200 });
+    }
+    return new Response("Not found", { status: 404 });
+  };
+
+  try {
+    const scan1 = await syncViaGmailFullSearch({
+      token: "mock-token",
+      queryAfterEpoch: 1731000000,
+      maxMessages: 300,
+    });
+
+    assert.equal(scan1.messages.length, 300);
+    assert.equal(scan1.hasMoreBacklog, true, "Hitting exact limit flags backlog remaining to ensure no dropped messages");
+
+    // Scan 2 resumes remaining window before the oldest message and finds 0 messages
+    const scan2 = await syncViaGmailFullSearch({
+      token: "mock-token",
+      queryAfterEpoch: 1731000000,
+      queryBeforeEpoch: 1731000100,
+      maxMessages: 300,
+      startHistorySnapshot: scan1.startHistorySnapshot,
+    });
+
+    assert.equal(scan2.messages.length, 0);
+    assert.equal(scan2.hasMoreBacklog, false, "Backlog cleanly exhausted without infinite loop");
+    assert.equal(scan2.latestHistoryId, "hist_boundary_300", "Checkpoint resolves cleanly to starting snapshot");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// =============================================================================
+// REGRESSION SCENARIO 7: Previously processed Gmail messages and deduplication
+// =============================================================================
+test("Scenario 7: Previously processed Gmail messages are reconciled with provenance without duplicate application mutations", async () => {
+  const { sql, table } = createMockQueueDb();
+
+  const legacyProcessedMap = new Map([
+    ["legacy_app_msg_1", "application_events"],
+    ["legacy_rev_msg_2", "recruitment_review_items"],
+  ]);
+
+  const rawMessages = [
+    { id: "legacy_app_msg_1", from: "recruiter@uber.com", subject: "Offer from Uber", date: "2026-11-09T10:00:00Z" },
+    { id: "legacy_rev_msg_2", from: "hr@stripe.com", subject: "Update on Stripe", date: "2026-11-09T10:05:00Z" },
+    { id: "brand_new_msg_3", from: "team@airbnb.com", subject: "Interview with Airbnb", date: "2026-11-09T10:10:00Z" },
+  ];
+
+  const queueItems = [];
+  const proposedChanges = [];
+  let legacyReconciledCount = 0;
+
+  for (const msg of rawMessages) {
+    if (legacyProcessedMap.has(msg.id)) {
+      const legacySource = legacyProcessedMap.get(msg.id);
+      legacyReconciledCount++;
+      queueItems.push({
+        owner_id: "f2729195-5445-4272-ab85-cac5b03b0967",
+        mailbox: "govardhanreddy.vys7@gmail.com",
+        message_id: msg.id,
+        message_timestamp: msg.date,
+        processing_status: "completed",
+        content_hash: `hash_${msg.id}`,
+        subject_clean: msg.subject,
+        sender_clean: msg.from,
+        attempt_count: 0,
+        max_attempts: 5,
+        review_status: legacySource === "recruitment_review_items" ? "requires_review" : "auto_approved",
+        evidence_references: { legacy_processed: true, legacy_source: legacySource },
+      });
+      // Invariant: Do not propose changes or reviews for legacy records
+      continue;
+    }
+
+    // New message
+    queueItems.push({
+      owner_id: "f2729195-5445-4272-ab85-cac5b03b0967",
+      mailbox: "govardhanreddy.vys7@gmail.com",
+      message_id: msg.id,
+      message_timestamp: msg.date,
+      processing_status: "pending",
+      content_hash: `hash_${msg.id}`,
+      subject_clean: msg.subject,
+      sender_clean: msg.from,
+      attempt_count: 0,
+      max_attempts: 5,
+      review_status: "pending",
+    });
+    proposedChanges.push({ messageId: msg.id, company: "Airbnb", newStage: "Interview Scheduled" });
+  }
+
+  assert.equal(legacyReconciledCount, 2, "Both legacy messages reconciled");
+  assert.equal(proposedChanges.length, 1, "Only the brand new message generates proposed changes");
+  assert.equal(proposedChanges[0].company, "Airbnb");
+
+  // Ingest into database
+  const enqResult = await enqueueDiscoveredMessages(sql, queueItems);
+  assert.equal(enqResult.newlyEnqueued, 3, "All 3 messages ingested into inventory");
+
+  const legacyRec1 = table.get("govardhanreddy.vys7@gmail.com:legacy_app_msg_1");
+  assert.equal(legacyRec1.processing_status, "completed");
+  assert.equal(legacyRec1.review_status, "auto_approved");
+  assert.equal(legacyRec1.evidence_references.legacy_source, "application_events");
+
+  // Deduplication on repeated delivery
+  const repeatedEnq = await enqueueDiscoveredMessages(sql, queueItems);
+  assert.equal(repeatedEnq.newlyEnqueued, 0, "Repeated delivery inserts 0 new rows");
+  assert.equal(repeatedEnq.duplicatesSkipped, 3, "All 3 messages identified as duplicates and skipped");
+});
+
+// =============================================================================
+// REGRESSION SCENARIO 8: Temporary message-fetch failures
+// =============================================================================
+test("Scenario 8: Temporary message-fetch failures are preserved as pending_fetch and permanent as excluded", async () => {
   const originalFetch = globalThis.fetch;
 
   let attemptCount500 = 0;
@@ -540,10 +898,8 @@ test("Test 4: Transient 429/5xx errors are preserved as pending_fetch; permanent
     }
     assert.equal(caughtPermanent instanceof PermanentMessageInaccessibleError, true);
 
-    // 3. Test queue preservation logic for both
+    // 3. Queue preservation logic for both
     const queueItems = [];
-
-    // Transient failure: preserved as pending_fetch so it can be retried later
     queueItems.push({
       owner_id: "f2729195-5445-4272-ab85-cac5b03b0967",
       mailbox: "govardhanreddy.vys7@gmail.com",
@@ -559,7 +915,6 @@ test("Test 4: Transient 429/5xx errors are preserved as pending_fetch; permanent
       error_details: [{ error: caughtTransient.message, timestamp: new Date().toISOString() }],
     });
 
-    // Permanent failure: marked as excluded so it doesn't stall workers or Grok
     queueItems.push({
       owner_id: "f2729195-5445-4272-ab85-cac5b03b0967",
       mailbox: "govardhanreddy.vys7@gmail.com",
@@ -584,85 +939,84 @@ test("Test 4: Transient 429/5xx errors are preserved as pending_fetch; permanent
   }
 });
 
-// -----------------------------------------------------------------------------
-// TEST 5: History pagination cannot lose messages
-// -----------------------------------------------------------------------------
-test("Test 5: History pagination handles multi-message records and mid-page limits losslessly", async () => {
-  const originalFetch = globalThis.fetch;
+// =============================================================================
+// REGRESSION SCENARIO 9: No application-stage changes in ingestion-only mode
+// =============================================================================
+test("Scenario 9: No application-stage changes occur in ingestion-only mode", async () => {
+  const { sql, table, cursors, syncLogs, applications } = createMockQueueDb();
 
-  // Mock Gmail users.history.list with:
-  // - Record 101: 2 messages (msg_1, msg_2)
-  // - Record 102: 2 messages (msg_3, msg_4)
-  // - Record 103: 1 message  (msg_5)
-  // - Record 104: 1 message  (msg_6)
-  globalThis.fetch = async (url) => {
-    const urlStr = String(url);
-    if (urlStr.includes("history?")) {
-      const u = new URL(urlStr);
-      const startHistoryId = u.searchParams.get("startHistoryId");
+  applications.set("app-stripe", { id: "app-stripe", company: "Stripe", hiring_stage: "Applied Confirmed" });
 
-      if (startHistoryId === "100") {
-        return new Response(JSON.stringify({
-          historyId: "104",
-          history: [
-            { id: "101", messagesAdded: [{ message: { id: "msg_1", threadId: "t1" } }, { message: { id: "msg_2", threadId: "t2" } }] },
-            { id: "102", messagesAdded: [{ message: { id: "msg_3", threadId: "t3" } }, { message: { id: "msg_4", threadId: "t4" } }] },
-            { id: "103", messagesAdded: [{ message: { id: "msg_5", threadId: "t5" } }] },
-            { id: "104", messagesAdded: [{ message: { id: "msg_6", threadId: "t6" } }] },
-          ],
-          nextPageToken: null,
-        }), { status: 200 });
-      } else if (startHistoryId === "102") {
-        // Resumed run starting after record 102
-        return new Response(JSON.stringify({
-          historyId: "104",
-          history: [
-            { id: "103", messagesAdded: [{ message: { id: "msg_5", threadId: "t5" } }] },
-            { id: "104", messagesAdded: [{ message: { id: "msg_6", threadId: "t6" } }] },
-          ],
-          nextPageToken: null,
-        }), { status: 200 });
-      }
-    }
-    return new Response("Not found", { status: 404 });
-  };
+  const queueItems = [
+    {
+      owner_id: "f2729195-5445-4272-ab85-cac5b03b0967",
+      mailbox: "govardhanreddy.vys7@gmail.com",
+      message_id: "msg_offer_1",
+      thread_id: "t_offer",
+      message_timestamp: "2026-11-09T11:00:00Z",
+      processing_status: "pending",
+      content_hash: "hash_offer",
+      subject_clean: "Offer from Stripe",
+      sender_clean: "recruiting@stripe.com",
+    },
+  ];
 
-  try {
-    // Pass 1: maxMessages = 3 (Record 101 has 2 messages, Record 102 has 2 messages).
-    // Record 102 is completed entirely (total 4 messages), then loop stops before Record 103.
-    // Checkpoint MUST NOT advance to 104; it must stop at record 102!
-    const run1 = await syncViaGmailHistory({
-      token: "mock-token",
-      startHistoryId: "100",
-      maxMessages: 3,
-    });
+  await sql.begin(async (tx) => {
+    await enqueueDiscoveredMessages(tx, queueItems);
 
-    assert.equal(run1.messages.length, 4, "Atomic record processing completes record 102 entirely (2 + 2 = 4 messages)");
-    assert.equal(run1.hasMoreBacklog, true, "Must flag backlog remaining");
-    assert.equal(run1.latestHistoryId, "102", "Checkpoint MUST be record 102, NOT premature 104!");
+    await tx`
+      insert into jobbot.sync_cursors (
+        owner_id, source_key, last_success_at, last_observed_at,
+        last_history_id, overlap_minutes, initial_lookback_hours
+      ) values (
+        ${"f2729195-5445-4272-ab85-cac5b03b0967"}, ${"gmail_status_ingestion"},
+        ${"2026-11-09T11:10:00Z"}, ${"2026-11-09T11:00:00Z"},
+        ${"hist_888"}, ${15}, ${72}
+      )
+    `;
+  });
 
-    // Pass 2: Resume with startHistoryId: "102"
-    const run2 = await syncViaGmailHistory({
-      token: "mock-token",
-      startHistoryId: run1.latestHistoryId,
-      maxMessages: 10,
-    });
-
-    assert.equal(run2.messages.length, 2, "Run 2 must pick up records 103 and 104 (msg_5, msg_6)");
-    assert.equal(run2.hasMoreBacklog, false, "Backlog exhausted");
-    assert.equal(run2.latestHistoryId, "104", "Final checkpoint advances to 104");
-
-    const allDiscoveredIds = [...run1.messages.map((m) => m.id), ...run2.messages.map((m) => m.id)];
-    assert.deepEqual(allDiscoveredIds, ["msg_1", "msg_2", "msg_3", "msg_4", "msg_5", "msg_6"], "Zero messages lost across paginated continuation!");
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+  assert.equal(table.size, 1);
+  assert.equal(applications.get("app-stripe").hiring_stage, "Applied Confirmed", "Application stage MUST NOT be modified in ingestion_only mode");
 });
 
-// -----------------------------------------------------------------------------
-// TEST 6: Expired history IDs trigger safe reconciliation
-// -----------------------------------------------------------------------------
-test("Test 6: Expired history ID triggers HTTP 404 fallback to full search reconciliation", async () => {
+// =============================================================================
+// REGRESSION SCENARIO 10: Existing diagnostic dry-run remaining read-only
+// =============================================================================
+test("Scenario 10: Existing diagnostic dry-run remains strictly read-only with 0 enqueued and 0 cursor advances", async () => {
+  const { sql, table, cursors, syncLogs } = createMockQueueDb();
+
+  const dryRunCommittedEnqueued = 0; // Strictly 0
+
+  await sql`
+    insert into jobbot.sync_logs (
+      run_id, bot_name, started_at, completed_at,
+      created_count, updated_count, skipped_count,
+      errors, verification_results
+    ) values (
+      ${"run-dry-10"}, ${"Gmail Status Agent"}, ${"2026-11-09T12:00:00Z"}, ${"2026-11-09T12:01:00Z"},
+      ${0}, ${0}, ${0},
+      ${[]},
+      ${{
+        mode: "diagnostic_dry_run",
+        dry_run: true,
+        checkpoint_advanced: false,
+        messages_discovered: 10,
+        messages_enqueued: 0,
+      }}
+    )
+  `;
+
+  assert.equal(table.size, 0, "Queue table MUST contain zero rows in diagnostic dry run");
+  assert.equal(cursors.size, 0, "No cursors may advance in diagnostic dry run");
+  assert.equal(syncLogs[0].verificationResults.messages_enqueued, 0);
+  assert.equal(syncLogs[0].verificationResults.checkpoint_advanced, false);
+});
+
+// =============================================================================
+// ADDITIONAL CONTRACT TESTS: Expired history recovery, Grok lease claim, flat error_details, sensitive filter
+// =============================================================================
+test("Test 11: Expired history ID triggers HTTP 404 fallback to full search reconciliation", async () => {
   const originalFetch = globalThis.fetch;
   let historyCalled = false;
   let searchCalled = false;
@@ -705,67 +1059,9 @@ test("Test 6: Expired history ID triggers HTTP 404 fallback to full search recon
   }
 });
 
-// -----------------------------------------------------------------------------
-// TEST 7: Repeated scans do not create duplicates
-// -----------------------------------------------------------------------------
-test("Test 7: Repeated scans do not create duplicate queue rows", async () => {
+test("Test 12: Queue ingestion persists messages when Grok is offline, and workers claim leases when online", async () => {
   const { sql, table } = createMockQueueDb();
 
-  const items = [
-    {
-      owner_id: "f2729195-5445-4272-ab85-cac5b03b0967",
-      mailbox: "govardhanreddy.vys7@gmail.com",
-      message_id: "idemp_msg_1",
-      message_timestamp: new Date().toISOString(),
-      processing_status: "pending",
-      content_hash: "hash_1",
-    },
-    {
-      owner_id: "f2729195-5445-4272-ab85-cac5b03b0967",
-      mailbox: "govardhanreddy.vys7@gmail.com",
-      message_id: "idemp_msg_2",
-      message_timestamp: new Date().toISOString(),
-      processing_status: "pending",
-      content_hash: "hash_2",
-    },
-  ];
-
-  const pass1 = await enqueueDiscoveredMessages(sql, items);
-  assert.equal(pass1.newlyEnqueued, 2);
-  assert.equal(pass1.duplicatesSkipped, 0);
-  assert.equal(table.size, 2);
-
-  const pass2 = await enqueueDiscoveredMessages(sql, items);
-  assert.equal(pass2.newlyEnqueued, 0, "Second pass must insert 0 new rows");
-  assert.equal(pass2.duplicatesSkipped, 2, "Second pass must identify 2 duplicates");
-  assert.equal(table.size, 2, "Table size remains strictly 2");
-});
-
-// -----------------------------------------------------------------------------
-// TEST 8: No live application updates occur
-// -----------------------------------------------------------------------------
-test("Test 8: Production live-writes gate blocks application mutations even if requested", () => {
-  const checkLiveWriteAllowed = (requestedMode, gateEnv) => {
-    if (requestedMode === "live_updates") {
-      // live_updates is strictly reserved for later deployment
-      return false;
-    }
-    return false;
-  };
-
-  assert.equal(checkLiveWriteAllowed("live_updates", "false"), false);
-  assert.equal(checkLiveWriteAllowed("live_updates", "true"), false);
-  assert.equal(checkLiveWriteAllowed("ingestion_only", "true"), false);
-  assert.equal(checkLiveWriteAllowed("diagnostic_dry_run", "true"), false);
-});
-
-// -----------------------------------------------------------------------------
-// TEST 9: Queue processing works independently of Grok availability
-// -----------------------------------------------------------------------------
-test("Test 9: Queue ingestion persists messages when Grok is offline, and workers claim leases when online", async () => {
-  const { sql, table } = createMockQueueDb();
-
-  // Ingestion runs while Grok is offline
   const items = [
     {
       owner_id: "f2729195-5445-4272-ab85-cac5b03b0967",
@@ -788,7 +1084,6 @@ test("Test 9: Queue ingestion persists messages when Grok is offline, and worker
   await enqueueDiscoveredMessages(sql, items);
   assert.equal(table.size, 2, "Messages queued independently of AI worker");
 
-  // Worker / Grok comes online and leases batch with FOR UPDATE SKIP LOCKED
   const claim = await claimQueueBatch(sql, {
     mailbox: "govardhanreddy.vys7@gmail.com",
     batchSize: 2,
@@ -799,7 +1094,6 @@ test("Test 9: Queue ingestion persists messages when Grok is offline, and worker
   assert.equal(claim.claimedItems.length, 2, "Grok worker claims both items successfully");
   assert.equal(claim.claimedItems[0].processing_status, "claimed");
 
-  // Worker completes analysis
   const completed = await completeQueueItem(sql, {
     itemId: claim.claimedItems[0].id,
     workerToken: "grok-worker-1",
@@ -812,10 +1106,7 @@ test("Test 9: Queue ingestion persists messages when Grok is offline, and worker
   assert.equal(table.get("govardhanreddy.vys7@gmail.com:offline_grok_1").processing_status, "completed");
 });
 
-// -----------------------------------------------------------------------------
-// TEST 10: Flat JSONB array for error_details
-// -----------------------------------------------------------------------------
-test("Test 10: failQueueItem maintains error_details as a flat JSONB array without nesting", async () => {
+test("Test 13: failQueueItem maintains error_details as a flat JSONB array without nesting", async () => {
   const { sql, table } = createMockQueueDb();
 
   const item = {
@@ -831,7 +1122,6 @@ test("Test 10: failQueueItem maintains error_details as a flat JSONB array witho
 
   await enqueueDiscoveredMessages(sql, [item]);
 
-  // Claim attempt 1
   const claim1 = await claimQueueBatch(sql, {
     mailbox: "govardhanreddy.vys7@gmail.com",
     batchSize: 1,
@@ -844,7 +1134,6 @@ test("Test 10: failQueueItem maintains error_details as a flat JSONB array witho
     error: "First error",
   });
 
-  // Claim attempt 2
   const claim2 = await claimQueueBatch(sql, {
     mailbox: "govardhanreddy.vys7@gmail.com",
     batchSize: 1,
@@ -865,10 +1154,7 @@ test("Test 10: failQueueItem maintains error_details as a flat JSONB array witho
   assert.equal(record.error_details[1].error, "Second error");
 });
 
-// -----------------------------------------------------------------------------
-// TEST 11: Sensitive message filtering and redaction
-// -----------------------------------------------------------------------------
-test("Test 11: Sensitive auth/security emails are excluded and redacted from queue content", async () => {
+test("Test 14: Sensitive auth/security emails are excluded and redacted from queue content", async () => {
   const email = {
     from: "security-noreply@google.com",
     subject: "Your Google verification code is 849201",
