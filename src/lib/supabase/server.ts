@@ -15,7 +15,7 @@ export async function createClient(): Promise<SupabaseClient> {
 
   return createServerClient(supabaseUrl, supabaseAnonKey, {
     db: {
-      schema: process.env.NEXT_PUBLIC_SUPABASE_SCHEMA || "jobbot",
+      schema: process.env.NEXT_PUBLIC_SUPABASE_SCHEMA || "public",
     },
     cookies: {
       getAll() {

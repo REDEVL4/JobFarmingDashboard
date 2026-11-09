@@ -9,7 +9,7 @@ export function createClient() {
 
   return createBrowserClient(supabaseUrl, supabaseAnonKey, {
     db: {
-      schema: process.env.NEXT_PUBLIC_SUPABASE_SCHEMA || "jobbot",
+      schema: (process.env.NEXT_PUBLIC_SUPABASE_SCHEMA as any) || "public",
     },
     auth: {
       persistSession: true,

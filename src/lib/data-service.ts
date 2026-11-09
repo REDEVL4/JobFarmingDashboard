@@ -51,26 +51,34 @@ export async function fetchApplications(): Promise<DataResult<ApplicationViewIte
     }
 
     // Execute authenticated query with owner session RLS
-    const { data, error } = await auth.client
-      .from("job_applications")
-      .select("*, job_opportunities(*)")
-      .order("created_at", { ascending: false });
+    const [appsRes, oppsRes] = await Promise.all([
+      auth.client
+        .from("jf_applications")
+        .select("*")
+        .order("created_at", { ascending: false }),
+      auth.client
+        .from("jf_opportunities")
+        .select(
+          "id, company, job_title, requisition_id, posting_url, application_url, salary_text, work_mode, employment_type, hire_type, fit_score, fit_explanation, discovery_source, location"
+        ),
+    ]);
 
-    if (error) {
-      console.error("Supabase query error for job_applications:", error.message);
+    if (appsRes.error) {
+      console.error("Supabase query error for jf_applications:", appsRes.error.message);
       const isPermission =
-        error.code === "42501" ||
-        error.message.toLowerCase().includes("permission") ||
-        error.message.toLowerCase().includes("policy") ||
-        error.message.toLowerCase().includes("rls");
+        appsRes.error.code === "42501" ||
+        appsRes.error.message.toLowerCase().includes("permission") ||
+        appsRes.error.message.toLowerCase().includes("policy") ||
+        appsRes.error.message.toLowerCase().includes("rls");
 
       return {
         data: [],
         status: isPermission ? "permission_denied" : "connection_error",
-        error: `Database query failed: ${error.message} (${error.code || "UNKNOWN"})`,
+        error: `Database query failed: ${appsRes.error.message} (${appsRes.error.code || "UNKNOWN"})`,
       };
     }
 
+    const data = appsRes.data;
     if (!data || data.length === 0) {
       return {
         data: [],
@@ -79,13 +87,15 @@ export async function fetchApplications(): Promise<DataResult<ApplicationViewIte
       };
     }
 
-    const applications: ApplicationViewItem[] = (
-      data as (DbJobApplication & { job_opportunities?: DbJobOpportunity })[]
-    ).map((item) => {
+    const oppsMap = new Map<string, DbJobOpportunity>(
+      ((oppsRes.data || []) as DbJobOpportunity[]).map((o) => [o.id, o])
+    );
+
+    const applications: ApplicationViewItem[] = (data as DbJobApplication[]).map((item) => {
       const rawStatus = item.application_status || item.status || "Applied";
       const hiringStage = item.hiring_stage;
       const { normalized } = normalizeStatus(rawStatus, hiringStage);
-      const opp = item.job_opportunities;
+      const opp = item.opportunity_id ? oppsMap.get(item.opportunity_id) : undefined;
 
       const salaryText = opp?.salary_text || "Not disclosed";
 
@@ -367,9 +377,13 @@ export async function fetchMonitoringStats(): Promise<DataResult<GmailMonitoring
     }
 
     const [syncRes, reviewRes] = await Promise.all([
-      auth.client.from("sync_logs").select("*").order("started_at", { ascending: false }).limit(20),
       auth.client
-        .from("recruitment_review_items")
+        .from("jf_recruitment_health")
+        .select("*")
+        .order("started_at", { ascending: false })
+        .limit(20),
+      auth.client
+        .from("jf_recruitment_review")
         .select("*")
         .order("created_at", { ascending: false })
         .limit(50),
@@ -465,12 +479,12 @@ export async function fetchOutreachStats(): Promise<DataResult<OutreachStats>> {
     }
 
     const { data, error } = await auth.client
-      .from("outreach_contacts")
+      .from("jf_outreach_contacts")
       .select("*")
       .order("created_at", { ascending: false });
 
     if (error) {
-      console.error("Supabase query error for outreach_contacts:", error.message);
+      console.error("Supabase query error for jf_outreach_contacts:", error.message);
       const isPermission =
         error.code === "42501" ||
         error.message.toLowerCase().includes("permission") ||
