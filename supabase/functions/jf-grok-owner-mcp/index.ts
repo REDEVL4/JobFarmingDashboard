@@ -17,29 +17,31 @@ const completeInput = z.strictObject({ ...ids, claim_id: z.uuidv4() });
 function result(data: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(data) }] };
 }
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ACTIVE_GROK_CLIENT_ID = '16bdb57f-c2cd-40d8-b6e1-c1a1b17e3f32';
 const TRUSTED_CLIENT_IDS = new Set([
-  // Primary active Grok connector
-  '16bdb57f-c2cd-40d8-b6e1-c1a1b17e3f32',
-  // Initial Grok runtime_status trial client
-  '67fc4ec0-f2cb-47ee-820d-b8649a08c761',
-  // Historical Grok connector registrations
-  '5dbf5812-a40c-4235-83d0-301525ecdefc',
-  '7adf0097-049b-4f59-82b1-17b032938f85',
-  'b1a6f987-30e0-4aec-b8e3-24a90b13c21a',
-  '0115daf5-ddc6-4b56-a4dd-2189b95a1543',
-  // Cursor MCP agent client
-  '7a493089-0500-4b0d-8a00-12140c16ac52',
+  // Primary active Grok connector (historical registrations & Cursor removed for least privilege)
+  ACTIVE_GROK_CLIENT_ID,
 ]);
 
 const handler = pipeline(
   [withOAuthProtectedResource(), withSupabase({ auth: 'user' })],
   async (req, ctx) => {
-    if (ctx.jwtClaims?.sub !== 'f2729195-5445-4272-ab85-cac5b03b0967' ||
-        ctx.jwtClaims.role !== 'authenticated') {
+    // 1. Authenticated owner UUID check
+    if (ctx.jwtClaims?.sub !== 'f2729195-5445-4272-ab85-cac5b03b0967') {
       return Response.json({ error: 'Owner authentication required' }, { status: 403 });
     }
+    // 2. Authenticated role check
+    if (ctx.jwtClaims?.role !== 'authenticated') {
+      return Response.json({ error: 'Authenticated role required' }, { status: 403 });
+    }
+    // 3. Present and valid OAuth client_id check (reject missing, null, empty, malformed)
     const clientId = ctx.jwtClaims?.client_id;
-    if (clientId && !TRUSTED_CLIENT_IDS.has(clientId)) {
+    if (!clientId || typeof clientId !== 'string' || !UUID_REGEX.test(clientId)) {
+      return Response.json({ error: 'Present and valid OAuth client_id required' }, { status: 403 });
+    }
+    // 4. Explicitly approved client ID check
+    if (!TRUSTED_CLIENT_IDS.has(clientId)) {
       return Response.json({ error: 'Unauthorized OAuth client' }, { status: 403 });
     }
     const message = req.method === 'POST' ? await req.clone().json().catch(() => null) : null;

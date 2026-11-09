@@ -1,29 +1,23 @@
 export const DESIGNATED_OWNER_UUID = "f2729195-5445-4272-ab85-cac5b03b0967";
 export const DESIGNATED_OWNER_EMAIL = "govardhanreddy.vys7@gmail.com";
 
-// Specifically trusted connector callback URIs
+// Verified Grok connector callback URI
 export const VERIFIED_GROK_CALLBACK_URI = "https://grok.com/connectors-oauth-exchange-code/";
-export const VERIFIED_CURSOR_CALLBACK_URI = "https://www.cursor.com/agents/mcp/oauth/callback";
 
+// Active approved redirect URIs (single verified Grok connector URI)
 export const TRUSTED_REDIRECT_URIS = [
   VERIFIED_GROK_CALLBACK_URI,
-  VERIFIED_CURSOR_CALLBACK_URI,
 ];
 
-// Specifically trusted pre-registered Grok & Cursor OAuth client IDs in Supabase Auth
+// Single active approved Grok OAuth client ID
+export const ACTIVE_GROK_CLIENT_ID = "16bdb57f-c2cd-40d8-b6e1-c1a1b17e3f32";
+
+// Specifically authorized OAuth client IDs in Supabase Auth
+// Historical registrations and Cursor access are removed to enforce least privilege.
 export const TRUSTED_STATIC_CLIENT_IDS = new Set([
-  // Primary active Grok connector
-  "16bdb57f-c2cd-40d8-b6e1-c1a1b17e3f32",
-  // Initial Grok runtime_status trial client
-  "67fc4ec0-f2cb-47ee-820d-b8649a08c761",
-  // Historical Grok connector registrations
-  "5dbf5812-a40c-4235-83d0-301525ecdefc",
-  "7adf0097-049b-4f59-82b1-17b032938f85",
-  "b1a6f987-30e0-4aec-b8e3-24a90b13c21a",
-  "0115daf5-ddc6-4b56-a4dd-2189b95a1543",
-  // Cursor MCP agent client
-  "7a493089-0500-4b0d-8a00-12140c16ac52",
+  ACTIVE_GROK_CLIENT_ID,
 ]);
+export const TRUSTED_OAUTH_CLIENT_IDS = TRUSTED_STATIC_CLIENT_IDS;
 
 export const STANDARD_SCOPES: Record<string, string> = {
   openid: "Verify your identity via OpenID Connect (user subject ID and token claims)",
@@ -138,7 +132,7 @@ export function parseScopes(scopeString: string | null | undefined): string[] {
 export type ClientTrustResult =
   | {
       trusted: true;
-      connector: "grok" | "cursor";
+      connector: "grok";
       isKnownStatic: boolean;
       clientName: string;
       clientId: string;
@@ -151,11 +145,16 @@ export type ClientTrustResult =
       connector?: "grok" | "cursor" | "untrusted";
       clientId?: string;
       redirectUri?: string;
+      isPendingApproval?: boolean;
     };
 
 /**
  * Strict OAuth Client verification:
- * Enforces exact registered Grok and Cursor callback URIs and rejects unknown or untrusted clients.
+ * Requires BOTH:
+ * 1. Exact approved Grok callback URI (https://grok.com/connectors-oauth-exchange-code/)
+ * 2. Explicitly authorized client ID (ACTIVE_GROK_CLIENT_ID)
+ *
+ * Dynamically registered or unknown clients remain untrusted until explicitly approved by the owner.
  */
 export function validateOAuthClient(
   client: { id: string; name?: string } | null | undefined,
@@ -180,46 +179,71 @@ export function validateOAuthClient(
 
   const trimmedRedirect = redirectUri.trim();
 
-  // Enforce exact trusted callback allowlist
-  if (!TRUSTED_REDIRECT_URIS.includes(trimmedRedirect)) {
+  // 1. Strict callback URI verification
+  if (trimmedRedirect !== VERIFIED_GROK_CALLBACK_URI) {
     return {
       trusted: false,
-      reason: `Unauthorized callback URI '${trimmedRedirect}'. Only verified connectors (${TRUSTED_REDIRECT_URIS.join(", ")}) are permitted.`,
+      reason: `Unauthorized callback URI '${trimmedRedirect}'. Only the verified Grok connector URI (${VERIFIED_GROK_CALLBACK_URI}) is permitted.`,
       connector: "untrusted",
       clientId: client.id,
       redirectUri: trimmedRedirect,
     };
   }
 
-  const isKnownStatic = TRUSTED_STATIC_CLIENT_IDS.has(client.id);
-
-  if (trimmedRedirect === VERIFIED_GROK_CALLBACK_URI) {
+  // 2. Strict client ID verification against explicitly approved allowlist
+  const isApproved = TRUSTED_OAUTH_CLIENT_IDS.has(client.id);
+  if (!isApproved) {
     return {
-      trusted: true,
+      trusted: false,
+      reason: `OAuth client '${client.id}' is not in the active authorized allowlist. Unknown or dynamically registered clients require explicit owner approval.`,
       connector: "grok",
-      isKnownStatic,
-      clientName: client.name || "Grok",
       clientId: client.id,
       redirectUri: trimmedRedirect,
-    };
-  }
-
-  if (trimmedRedirect === VERIFIED_CURSOR_CALLBACK_URI) {
-    return {
-      trusted: true,
-      connector: "cursor",
-      isKnownStatic,
-      clientName: client.name || "Cursor",
-      clientId: client.id,
-      redirectUri: trimmedRedirect,
+      isPendingApproval: true,
     };
   }
 
   return {
-    trusted: false,
-    reason: "Client failed verification policy.",
-    connector: "untrusted",
+    trusted: true,
+    connector: "grok",
+    isKnownStatic: true,
+    clientName: client.name || "Grok",
     clientId: client.id,
     redirectUri: trimmedRedirect,
   };
+}
+
+/**
+ * Validates automatic redirect URLs from previously approved OAuth grants:
+ * Ensures the destination exactly matches the approved Grok callback URI.
+ */
+export function validateAutoRedirectUrl(redirectUrl: string | null | undefined): {
+  valid: boolean;
+  error?: string;
+  targetOriginPath?: string;
+} {
+  if (!redirectUrl || typeof redirectUrl !== "string") {
+    return {
+      valid: false,
+      error: "Missing redirect URL in authorization response.",
+    };
+  }
+
+  try {
+    const parsed = new URL(redirectUrl.trim());
+    const originPath = `${parsed.origin}${parsed.pathname}`;
+    if (originPath !== VERIFIED_GROK_CALLBACK_URI) {
+      return {
+        valid: false,
+        error: `Unauthorized auto-redirect destination '${originPath}'. Only the verified Grok connector callback (${VERIFIED_GROK_CALLBACK_URI}) is permitted.`,
+        targetOriginPath: originPath,
+      };
+    }
+    return { valid: true, targetOriginPath: originPath };
+  } catch {
+    return {
+      valid: false,
+      error: "Malformed redirect URL returned by authorization server.",
+    };
+  }
 }

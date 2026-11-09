@@ -22,9 +22,11 @@ import {
   DESIGNATED_OWNER_UUID,
   DESIGNATED_OWNER_EMAIL,
   STANDARD_SCOPES,
+  TRUSTED_OAUTH_CLIENT_IDS,
   validateAuthorizationId,
   validateOwnerAccess,
   validateOAuthClient,
+  validateAutoRedirectUrl,
   type ClientTrustResult,
 } from "@/lib/oauth-validation";
 import type { OAuthAuthorizationDetails } from "@supabase/supabase-js";
@@ -99,9 +101,48 @@ function ConsentContent() {
           return;
         }
 
-        // If 'authorization_id' is NOT in data, user has previously consented; redirect immediately to Supabase redirect_url
+        // If 'authorization_id' is NOT in data, user has previously consented.
+        // SECURITY CHECK: Verify that the auto-redirect does not bypass client trust policy!
         if (!("authorization_id" in data)) {
           const autoRedirect = (data as { redirect_url: string }).redirect_url;
+          const redirectValidation = validateAutoRedirectUrl(autoRedirect);
+
+          if (!redirectValidation.valid) {
+            if (isMounted) {
+              setErrorMessage(
+                `Access denied: ${redirectValidation.error} Automatic redirect blocked to prevent unauthorized client access.`
+              );
+              setLoading(false);
+            }
+            return;
+          }
+
+          // Verify that the user's active grants actually include an approved client
+          const { data: grants, error: grantsError } = await supabase.auth.oauth.listGrants();
+          if (grantsError || !grants) {
+            if (isMounted) {
+              setErrorMessage(
+                "Unable to verify previously approved client grants. Automatic redirect blocked for security."
+              );
+              setLoading(false);
+            }
+            return;
+          }
+
+          const hasTrustedGrant = grants.some(
+            (g) => g.client && TRUSTED_OAUTH_CLIENT_IDS.has(g.client.id)
+          );
+
+          if (!hasTrustedGrant) {
+            if (isMounted) {
+              setErrorMessage(
+                "Access denied: Previously recorded authorization grant belongs to an unapproved or revoked client. Automatic redirect blocked. Contact administrator to explicitly authorize this client ID."
+              );
+              setLoading(false);
+            }
+            return;
+          }
+
           if (isMounted) {
             setRedirectUrl(autoRedirect);
             setDecisionCompleted("approved");
@@ -320,10 +361,10 @@ function ConsentContent() {
                   <div className="flex justify-between items-center">
                     <span className="text-muted-foreground">Registration Status:</span>
                     <span className="text-[11px] font-medium text-foreground">
-                      {clientTrust?.trusted && clientTrust.isKnownStatic ? (
-                        <span className="text-emerald-600 dark:text-emerald-400">Known Static Client ID</span>
-                      ) : clientTrust?.trusted ? (
-                        <span className="text-amber-600 dark:text-amber-400">Dynamic Registration (Owner Review Required)</span>
+                      {clientTrust?.trusted ? (
+                        <span className="text-emerald-600 dark:text-emerald-400 font-semibold">Authorized Grok Connector</span>
+                      ) : clientTrust?.isPendingApproval ? (
+                        <span className="text-amber-600 dark:text-amber-400 font-semibold">Dynamic Registration (Owner Allowlist Required)</span>
                       ) : (
                         <span className="text-rose-600 font-semibold">Untrusted / Disallowed Client</span>
                       )}
@@ -398,10 +439,12 @@ function ConsentContent() {
           >
             {submitting ? (
               <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+            ) : !clientTrust?.trusted ? (
+              <Lock className="h-4 w-4 mr-1.5" />
             ) : (
               <Check className="h-4 w-4 mr-1.5" />
             )}
-            Authorize Application
+            {!clientTrust?.trusted ? "Approval Unavailable" : "Authorize Application"}
           </Button>
         </CardFooter>
       </Card>
