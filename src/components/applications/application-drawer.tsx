@@ -62,6 +62,32 @@ export function ApplicationDrawer({ application, onClose }: ApplicationDrawerPro
                     {application.location} ({application.remoteType})
                   </span>
                 </div>
+
+                {/* Direct Action Links */}
+                <div className="flex items-center gap-2 pt-2 flex-wrap">
+                  {application.postingUrl && (
+                    <a
+                      href={application.postingUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold bg-primary text-primary-foreground hover:bg-primary/90 transition-colors shadow-xs"
+                    >
+                      <ExternalLink className="h-3.5 w-3.5" />
+                      <span>Job Posting</span>
+                    </a>
+                  )}
+                  {application.resumeUrl && (
+                    <a
+                      href={application.resumeUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 hover:bg-blue-500/20 transition-colors"
+                    >
+                      <FileText className="h-3.5 w-3.5" />
+                      <span>View Resume (PDF)</span>
+                    </a>
+                  )}
+                </div>
               </div>
 
               <Button variant="ghost" size="icon" onClick={onClose} className="shrink-0">
@@ -168,18 +194,63 @@ export function ApplicationDrawer({ application, onClose }: ApplicationDrawerPro
             {/* Associated Documents */}
             <div className="space-y-2 pt-2 border-t">
               <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                Documents & Links
+                Documents & External Links
               </h4>
               <div className="flex flex-wrap gap-2">
-                <Button variant="outline" size="sm" className="h-8 gap-1.5 text-xs">
-                  <FileText className="h-3.5 w-3.5 text-brand-500" />
-                  <span>Tailored Resume (PDF)</span>
-                </Button>
-                {application.applicationUrl && (
-                  <Button variant="outline" size="sm" className="h-8 gap-1.5 text-xs" asChild>
-                    <a href={application.applicationUrl} target="_blank" rel="noreferrer">
-                      <span>Posting Portal</span>
-                      <ExternalLink className="h-3.5 w-3.5" />
+                {application.resumeUrl ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-9 gap-2 text-xs font-medium border-blue-200 dark:border-blue-900 bg-blue-50/40 dark:bg-blue-950/20 text-blue-700 dark:text-blue-300 hover:bg-blue-100/50"
+                    asChild
+                  >
+                    <a href={application.resumeUrl} target="_blank" rel="noopener noreferrer">
+                      <FileText className="h-4 w-4 text-blue-600 dark:text-blue-400" />
+                      <span className="font-semibold">{application.resumeFileName || "Tailored Resume (PDF)"}</span>
+                      <ExternalLink className="h-3 w-3 ml-0.5 opacity-70" />
+                    </a>
+                  </Button>
+                ) : (
+                  <Button variant="outline" size="sm" className="h-9 gap-2 text-xs text-muted-foreground opacity-60" disabled>
+                    <FileText className="h-4 w-4" />
+                    <span>No Resume Uploaded</span>
+                  </Button>
+                )}
+
+                {application.coverLetterUrl && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-9 gap-2 text-xs font-medium border-amber-200 dark:border-amber-900 bg-amber-50/40 dark:bg-amber-950/20 text-amber-700 dark:text-amber-300 hover:bg-amber-100/50"
+                    asChild
+                  >
+                    <a href={application.coverLetterUrl} target="_blank" rel="noopener noreferrer">
+                      <FileText className="h-4 w-4 text-amber-600 dark:text-amber-400" />
+                      <span className="font-semibold">Cover Letter (PDF)</span>
+                      <ExternalLink className="h-3 w-3 ml-0.5 opacity-70" />
+                    </a>
+                  </Button>
+                )}
+
+                {application.postingUrl && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-9 gap-2 text-xs font-medium border-emerald-200 dark:border-emerald-900 bg-emerald-50/40 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100/50"
+                    asChild
+                  >
+                    <a href={application.postingUrl} target="_blank" rel="noopener noreferrer">
+                      <ExternalLink className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+                      <span className="font-semibold">Original Job Posting</span>
+                    </a>
+                  </Button>
+                )}
+
+                {application.applicationUrl && application.applicationUrl !== application.postingUrl && (
+                  <Button variant="outline" size="sm" className="h-9 gap-2 text-xs font-medium text-muted-foreground hover:text-foreground" asChild>
+                    <a href={application.applicationUrl} target="_blank" rel="noopener noreferrer">
+                      <ExternalLink className="h-4 w-4" />
+                      <span>Application Portal / Confirmation</span>
                     </a>
                   </Button>
                 )}

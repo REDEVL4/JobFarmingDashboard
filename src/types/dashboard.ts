@@ -41,7 +41,16 @@ export interface ApplicationViewItem {
   requiresFollowUp: boolean;
   notes?: string;
   resumeUrl?: string;
+  resumeFileName?: string;
+  coverLetterUrl?: string;
+  postingUrl?: string;
   applicationUrl?: string;
+  documents?: {
+    id: string;
+    name: string;
+    type: string;
+    url: string;
+  }[];
   timeline: {
     status: string;
     timestamp: string;

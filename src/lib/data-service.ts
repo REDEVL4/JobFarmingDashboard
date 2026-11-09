@@ -51,7 +51,7 @@ export async function fetchApplications(): Promise<DataResult<ApplicationViewIte
     }
 
     // Execute authenticated query with owner session RLS
-    const [appsRes, oppsRes] = await Promise.all([
+    const [appsRes, oppsRes, docsRes] = await Promise.all([
       auth.client
         .from("jf_applications")
         .select("*")
@@ -61,6 +61,9 @@ export async function fetchApplications(): Promise<DataResult<ApplicationViewIte
         .select(
           "id, company, job_title, requisition_id, posting_url, application_url, salary_text, work_mode, employment_type, hire_type, fit_score, fit_explanation, discovery_source, location"
         ),
+      auth.client
+        .from("jf_documents")
+        .select("id, application_id, doc_type, original_filename, storage_path, mime_type"),
     ]);
 
     if (appsRes.error) {
@@ -91,11 +94,44 @@ export async function fetchApplications(): Promise<DataResult<ApplicationViewIte
       ((oppsRes.data || []) as DbJobOpportunity[]).map((o) => [o.id, o])
     );
 
+    const docsByAppMap = new Map<string, any[]>();
+    const docsByIdMap = new Map<string, any>();
+    ((docsRes.data || []) as any[]).forEach((doc) => {
+      docsByIdMap.set(doc.id, doc);
+      if (doc.application_id) {
+        const existing = docsByAppMap.get(doc.application_id) || [];
+        existing.push(doc);
+        docsByAppMap.set(doc.application_id, existing);
+      }
+    });
+
     const applications: ApplicationViewItem[] = (data as DbJobApplication[]).map((item) => {
       const rawStatus = item.application_status || item.status || "Applied";
       const hiringStage = item.hiring_stage;
       const { normalized } = normalizeStatus(rawStatus, hiringStage);
       const opp = item.opportunity_id ? oppsMap.get(item.opportunity_id) : undefined;
+
+      const appDocs = docsByAppMap.get(item.id) || [];
+      const resumeDoc =
+        appDocs.find((d) => d.doc_type === "resume") ||
+        (item.resume_document_id ? docsByIdMap.get(item.resume_document_id) : undefined);
+      const coverLetterDoc =
+        appDocs.find((d) => d.doc_type === "cover_letter") ||
+        (item.cover_letter_document_id ? docsByIdMap.get(item.cover_letter_document_id) : undefined);
+
+      const resumeUrl = resumeDoc ? `/api/documents/${resumeDoc.id}` : undefined;
+      const resumeFileName = resumeDoc?.original_filename || "Tailored Resume (PDF)";
+      const coverLetterUrl = coverLetterDoc ? `/api/documents/${coverLetterDoc.id}` : undefined;
+
+      const postingUrl = item.posting_url || opp?.posting_url || undefined;
+      const applicationUrl = item.application_url || opp?.application_url || undefined;
+
+      const mappedDocuments = appDocs.map((d) => ({
+        id: d.id,
+        name: d.original_filename || (d.doc_type === "resume" ? "Resume (PDF)" : "Cover Letter (PDF)"),
+        type: d.doc_type,
+        url: `/api/documents/${d.id}`,
+      }));
 
       const salaryText = opp?.salary_text || "Not disclosed";
 
@@ -141,6 +177,12 @@ export async function fetchApplications(): Promise<DataResult<ApplicationViewIte
           item.application_status === "Submission Pending" ||
           item.verification_status === "unverified",
         notes: item.notes || opp?.fit_explanation || "",
+        postingUrl,
+        applicationUrl,
+        resumeUrl,
+        resumeFileName,
+        coverLetterUrl,
+        documents: mappedDocuments,
         timeline: [
           { status: rawStatus, timestamp: item.created_at, note: "Initial entry" },
           ...(hiringStage

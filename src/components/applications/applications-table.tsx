@@ -15,6 +15,7 @@ import {
   Calendar,
   X,
   ExternalLink,
+  FileText,
   SlidersHorizontal,
   Bookmark,
   Check,
@@ -542,17 +543,38 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
                     {app.salaryText}
                   </td>
                   <td className="py-3.5 px-4 text-right">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setActiveApplication(app);
-                      }}
-                      className="h-7 text-xs text-muted-foreground hover:text-foreground"
-                    >
-                      Details →
-                    </Button>
+                    <div className="flex items-center justify-end gap-1.5" onClick={(e) => e.stopPropagation()}>
+                      {app.postingUrl && (
+                        <a
+                          href={app.postingUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title="Open Original Job Posting"
+                          className="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-primary transition-colors"
+                        >
+                          <ExternalLink className="h-3.5 w-3.5" />
+                        </a>
+                      )}
+                      {app.resumeUrl && (
+                        <a
+                          href={app.resumeUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title="View Tailored Resume (PDF)"
+                          className="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-blue-600 dark:hover:text-blue-400 transition-colors"
+                        >
+                          <FileText className="h-3.5 w-3.5" />
+                        </a>
+                      )}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setActiveApplication(app)}
+                        className="h-7 text-xs text-muted-foreground hover:text-foreground ml-1"
+                      >
+                        Details →
+                      </Button>
+                    </div>
                   </td>
                 </tr>
               ))
@@ -595,6 +617,41 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
                   <span>Location: </span>
                   <span className="text-foreground">{app.location} ({app.remoteType})</span>
                 </div>
+              </div>
+
+              <div className="flex items-center justify-between pt-1 text-xs" onClick={(e) => e.stopPropagation()}>
+                <div className="flex items-center gap-2">
+                  {app.postingUrl && (
+                    <a
+                      href={app.postingUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 text-[11px] text-primary hover:underline font-medium"
+                    >
+                      <ExternalLink className="h-3 w-3" />
+                      Posting
+                    </a>
+                  )}
+                  {app.resumeUrl && (
+                    <a
+                      href={app.resumeUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 text-[11px] text-blue-600 dark:text-blue-400 hover:underline font-medium"
+                    >
+                      <FileText className="h-3 w-3" />
+                      Resume
+                    </a>
+                  )}
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setActiveApplication(app)}
+                  className="h-6 text-[11px] text-muted-foreground"
+                >
+                  View Details →
+                </Button>
               </div>
             </div>
           ))
