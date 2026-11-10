@@ -51,14 +51,27 @@ test("Cursor OAuth: rejects cleartext loopback http://127.0.0.1:8787/callback", 
   assert.match(res.reason, /Insecure loopback redirect URI/i);
 });
 
-test("Cursor OAuth: rejects arbitrary/unapproved client ID attempting to use Cursor callback", () => {
-  const arbitraryClient = {
-    id: "99999999-9999-9999-9999-999999999999",
+test("Cursor OAuth: supports new dynamically registered client UUID from server-verified authorization details", () => {
+  const freshClient = {
+    id: "24c4a738-2e39-4298-a579-e1024a1b2686",
     name: "Cursor",
   };
-  const res = validateOAuthClient(arbitraryClient, VERIFIED_CURSOR_CALLBACK_URI);
+  const res = validateOAuthClient(freshClient, VERIFIED_CURSOR_CALLBACK_URI);
+  assert.equal(res.trusted, true);
+  assert.equal(res.connector, "cursor");
+  assert.equal(res.isKnownStatic, false);
+  assert.equal(res.isDynamicRegistration, true);
+  assert.equal(res.requiresInteractiveConsent, true);
+});
+
+test("Cursor OAuth: rejects mismatched callback even for dynamically registered UUID", () => {
+  const freshClient = {
+    id: "24c4a738-2e39-4298-a579-e1024a1b2686",
+    name: "Cursor",
+  };
+  const res = validateOAuthClient(freshClient, VERIFIED_GROK_CALLBACK_URI);
   assert.equal(res.trusted, false);
-  assert.match(res.reason, /Unauthorized Cursor client ID/i);
+  assert.match(res.reason, /Cursor must use the verified HTTPS callback/);
 });
 
 test("Cursor OAuth: rejects non-Cursor client name attempting to use Cursor callback", () => {
