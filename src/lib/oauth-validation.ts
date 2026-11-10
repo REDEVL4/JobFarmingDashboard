@@ -249,7 +249,7 @@ export function validateOAuthClient(
 
 /**
  * Validates automatic redirect URLs from previously approved OAuth grants:
- * Ensures destination is an exact allowlisted Grok or Cursor callback URI.
+ * Ensures the destination exactly matches the approved Grok callback URI.
  */
 export function validateAutoRedirectUrl(redirectUrl: string | null | undefined): {
   valid: boolean;
@@ -266,10 +266,10 @@ export function validateAutoRedirectUrl(redirectUrl: string | null | undefined):
   try {
     const parsed = new URL(redirectUrl.trim());
     const originPath = `${parsed.origin}${parsed.pathname}`;
-    if (!TRUSTED_REDIRECT_URIS.includes(originPath)) {
+    if (originPath !== VERIFIED_GROK_CALLBACK_URI) {
       return {
         valid: false,
-        error: `Unauthorized auto-redirect destination '${originPath}'. The redirect must match a verified connector callback.`,
+        error: `Unauthorized auto-redirect destination '${originPath}'. Only the verified Grok connector callback (${VERIFIED_GROK_CALLBACK_URI}) is permitted.`,
         targetOriginPath: originPath,
       };
     }
