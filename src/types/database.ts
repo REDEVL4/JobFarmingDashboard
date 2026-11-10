@@ -220,5 +220,10 @@ export interface DbEmailEvent {
   action_taken?: string | null;
   actionTaken?: string | null;
   created_at?: string;
+  evidence_summary?: string;
+  proposed_stage?: string | null;
+  candidate_applications?: any[];
+  state?: "open" | "resolved" | "ignored" | string;
+  reason_code?: string;
 }
 

@@ -57,9 +57,10 @@ Select the most accurate category:
 - `rejection`: "Thank you for your interest, however we have decided to pursue other candidates"
 - `offer`: "Offer of employment", "Offer letter"
 - `other_uncertain`: Ambiguous company name, general job newsletter, or automated bounce
+- `irrelevant_exclusion`: Job board alert (ZipRecruiter, Jobright, etc.), marketing, generic LinkedIn suggestions, or security OTPs
 
-### 5. Submit Classification Proposal
-Submit the proposal into the review queue for owner confirmation:
+### 5. Submit Classification Proposal or Exclusion
+For genuine proposals (enters owner review queue):
 ```json
 {
   "name": "submit_classification_proposal",
@@ -71,7 +72,23 @@ Submit the proposal into the review queue for owner confirmation:
     "evidence_summary": "Subject clean: 'Update on your application with Stripe'. Sender: 'recruiting@stripe.com'. Body confirms candidate was not selected.",
     "proposed_stage": "Rejected",
     "ambiguity_notes": null,
-    "idempotency_key": "<uuid>"
+    "idempotency_key": "<uuid>",
+    "disposition": "proposal"
+  }
+}
+```
+
+For irrelevant exclusions (durably marked as ignored/excluded; does NOT enter review queue):
+```json
+{
+  "name": "submit_classification_proposal",
+  "arguments": {
+    "queue_id": "<uuid-from-queue>",
+    "classification": "irrelevant_exclusion",
+    "confidence": 0.99,
+    "evidence_summary": "Excluded: Automated job alert from alert@ziprecruiter.com. Not related to an active candidate application.",
+    "idempotency_key": "<uuid>",
+    "disposition": "exclude"
   }
 }
 ```

@@ -38,6 +38,58 @@ export function MonitoringView({ initialStats, fetchStatus, errorMessage }: Moni
   const [dryRunResult, setDryRunResult] = useState<any | null>(null);
   const [dryRunError, setDryRunError] = useState<string | null>(null);
 
+  const [resolvingId, setResolvingId] = useState<string | null>(null);
+  const [resolutionFeedback, setResolutionFeedback] = useState<{ id: string; type: "success" | "error"; text: string } | null>(null);
+
+  const handleResolveReview = async (
+    itemId: string,
+    action: "approve" | "reject" | "needs_review",
+    notes?: string,
+    targetApplicationId?: string
+  ) => {
+    setResolvingId(itemId);
+    setResolutionFeedback(null);
+    try {
+      const res = await fetch("/api/recruitment/resolve-review", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reviewItemId: itemId, action, notes, targetApplicationId }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        setResolutionFeedback({ id: itemId, type: "error", text: data.error || "Failed to resolve review item." });
+      } else {
+        setResolutionFeedback({
+          id: itemId,
+          type: "success",
+          text:
+            action === "approve"
+              ? "Proposal approved. Application updated atomically."
+              : action === "reject"
+              ? "Proposal rejected and queue item marked ignored."
+              : "Flagged for owner review with updated notes.",
+        });
+        setStats((prev) => ({
+          ...prev,
+          needsReviewCount: Math.max(0, prev.needsReviewCount - (action === "approve" || action === "reject" ? 1 : 0)),
+          events: prev.events.map((e) =>
+            e.id === itemId
+              ? {
+                  ...e,
+                  state: action === "approve" ? "resolved" : action === "reject" ? "ignored" : "open",
+                  actionTaken: action === "approve" ? "approved" : action === "reject" ? "ignored" : "needs_review",
+                }
+              : e
+          ),
+        }));
+      }
+    } catch (err: any) {
+      setResolutionFeedback({ id: itemId, type: "error", text: err?.message || "Network error occurred." });
+    } finally {
+      setResolvingId(null);
+    }
+  };
+
   const handleTriggerDryRun = async (gapReconciliation = false) => {
     setIsTriggeringDryRun(true);
     setDryRunError(null);
@@ -336,32 +388,128 @@ export function MonitoringView({ initialStats, fetchStatus, errorMessage }: Moni
               <p className="text-xs text-muted-foreground">All correspondence has been processed.</p>
             </div>
           ) : (
-            <div className="divide-y text-xs max-h-[500px] overflow-y-auto">
-              {stats.events.slice(0, 30).map((event) => (
-                <div
-                  key={event.id}
-                  className="p-4 flex flex-col md:flex-row md:items-start justify-between gap-3 hover:bg-muted/40 transition-colors"
-                >
-                  <div className="space-y-1.5 flex-1">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-semibold text-foreground">{event.subject}</span>
-                      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
-                        {event.sender}
-                      </span>
-                      {event.classification && (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
-                          Proposed: {event.classification}
-                        </span>
-                      )}
-                    </div>
-                  </div>
+            <div className="divide-y text-xs max-h-[550px] overflow-y-auto">
+              {stats.events.slice(0, 30).map((event) => {
+                const candidates = Array.isArray(event.candidate_applications) ? event.candidate_applications : [];
+                const matchedCandidate = candidates[0];
+                const isResolving = resolvingId === event.id;
+                const feedback = resolutionFeedback?.id === event.id ? resolutionFeedback : null;
+                const isResolved = event.state === "resolved" || event.actionTaken === "approved";
+                const isIgnored = event.state === "ignored" || event.actionTaken === "ignored";
+                const isOpen = !isResolved && !isIgnored;
 
-                  <div className="flex items-center gap-2 shrink-0 text-muted-foreground font-mono text-[11px]">
-                    <Clock className="h-3.5 w-3.5" />
-                    <span>{formatDateTime(event.receivedAt)}</span>
+                return (
+                  <div
+                    key={event.id}
+                    className="p-4 space-y-3 hover:bg-muted/40 transition-colors"
+                  >
+                    <div className="flex flex-col md:flex-row md:items-start justify-between gap-3">
+                      <div className="space-y-1.5 flex-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-semibold text-foreground text-sm">{event.subject}</span>
+                          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                            {event.sender}
+                          </span>
+                          {event.classification && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
+                              Proposed: {event.proposed_stage || event.classification}
+                            </span>
+                          )}
+                          {isResolved && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 flex items-center gap-1">
+                              <CheckCircle2 className="h-3 w-3" /> Approved & Updated
+                            </span>
+                          )}
+                          {isIgnored && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold bg-zinc-500/10 text-zinc-600 dark:text-zinc-400 border border-zinc-500/20 flex items-center gap-1">
+                              <XCircle className="h-3 w-3" /> Ignored
+                            </span>
+                          )}
+                        </div>
+
+                        {event.evidence_summary && (
+                          <p className="text-xs text-muted-foreground bg-muted/30 p-2 rounded border border-border/50">
+                            <span className="font-medium text-foreground">Evidence: </span>
+                            {event.evidence_summary}
+                          </p>
+                        )}
+
+                        {matchedCandidate && (
+                          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                            <span className="font-medium text-foreground">Matched Application:</span>
+                            <span className="font-semibold text-foreground">{matchedCandidate.company}</span>
+                            {matchedCandidate.job_title && <span>— {matchedCandidate.job_title}</span>}
+                            {matchedCandidate.current_status && (
+                              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-muted">
+                                Current: {matchedCandidate.current_status}
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0 text-muted-foreground font-mono text-[11px]">
+                        <Clock className="h-3.5 w-3.5" />
+                        <span>{formatDateTime(event.receivedAt || event.created_at)}</span>
+                      </div>
+                    </div>
+
+                    {feedback && (
+                      <div
+                        className={`text-xs px-3 py-1.5 rounded flex items-center gap-2 ${
+                          feedback.type === "success"
+                            ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/20"
+                            : "bg-red-500/10 text-red-700 dark:text-red-300 border border-red-500/20"
+                        }`}
+                      >
+                        {feedback.type === "success" ? <Check className="h-3.5 w-3.5" /> : <AlertTriangle className="h-3.5 w-3.5" />}
+                        <span>{feedback.text}</span>
+                      </div>
+                    )}
+
+                    {isOpen && (
+                      <div className="flex items-center gap-2 pt-1 border-t border-border/40">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={isResolving}
+                          onClick={() => handleResolveReview(event.id, "approve", undefined, matchedCandidate?.id)}
+                          className="h-7 text-xs px-2.5 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 hover:text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300 dark:hover:bg-emerald-900/60 border-emerald-200 dark:border-emerald-800"
+                        >
+                          {isResolving ? (
+                            <RotateCw className="h-3 w-3 animate-spin mr-1" />
+                          ) : (
+                            <Check className="h-3 w-3 mr-1" />
+                          )}
+                          Approve Transition
+                        </Button>
+
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={isResolving}
+                          onClick={() => handleResolveReview(event.id, "reject")}
+                          className="h-7 text-xs px-2.5 bg-rose-50 text-rose-700 hover:bg-rose-100 hover:text-rose-800 dark:bg-rose-950/40 dark:text-rose-300 dark:hover:bg-rose-900/60 border-rose-200 dark:border-rose-800"
+                        >
+                          <XCircle className="h-3 w-3 mr-1" />
+                          Reject / Ignore
+                        </Button>
+
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={isResolving}
+                          onClick={() => handleResolveReview(event.id, "needs_review", "Requires manual owner review")}
+                          className="h-7 text-xs px-2 text-muted-foreground hover:text-foreground"
+                        >
+                          <Info className="h-3 w-3 mr-1" />
+                          Needs Review
+                        </Button>
+                      </div>
+                    )}
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </CardContent>

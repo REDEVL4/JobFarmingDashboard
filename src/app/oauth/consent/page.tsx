@@ -326,7 +326,9 @@ function ConsentContent() {
                     <span className="text-[11px] font-medium text-foreground">
                       {clientTrust?.trusted ? (
                         <span className="text-emerald-600 dark:text-emerald-400 font-semibold">
-                          {clientTrust.isDynamicRegistration
+                          {clientTrust.connector === "cursor"
+                            ? "Verified Cursor Desktop MCP Connector (Interactive Consent Required)"
+                            : clientTrust.isDynamicRegistration
                             ? "Dynamic Grok Registration (Interactive Consent Required)"
                             : "Approved Grok Connector"}
                         </span>

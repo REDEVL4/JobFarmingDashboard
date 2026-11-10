@@ -463,15 +463,31 @@ export async function fetchMonitoringStats(): Promise<DataResult<GmailMonitoring
     );
     const totalConfirmed = syncLogs.reduce((acc, log) => acc + (log.updated_count || 0), 0);
 
-    const mappedEvents = reviewItems.map((item) => ({
-      id: item.id,
-      receivedAt: item.created_at,
-      sender: item.mailbox,
-      subject: item.evidence_summary || `Message ID: ${item.message_id.slice(0, 12)}`,
-      classification: (item.proposed_stage?.toLowerCase() || "acknowledgement") as any,
-      confidence: 0.95,
-      actionTaken: item.state === "open" ? "queued_for_review" : item.state,
-    }));
+    const mappedEvents = reviewItems.map((item) => {
+      const candidates = Array.isArray(item.candidate_applications)
+        ? item.candidate_applications
+        : [];
+      const primaryCandidate = candidates[0];
+      return {
+        id: item.id,
+        gmail_message_id: item.message_id,
+        thread_id: item.thread_id,
+        receivedAt: item.created_at,
+        created_at: item.created_at,
+        sender: item.mailbox,
+        from_email: item.mailbox,
+        subject: item.evidence_summary || `Message ID: ${item.message_id.slice(0, 12)}`,
+        evidence_summary: item.evidence_summary,
+        classification: (item.reason_code || item.proposed_stage?.toLowerCase() || "acknowledgement") as any,
+        proposed_stage: item.proposed_stage || "Applied Confirmed",
+        confidence: primaryCandidate?.confidence ?? 0.95,
+        matched_application_id: item.resolved_application_id || primaryCandidate?.id || null,
+        candidate_applications: candidates,
+        state: item.state,
+        reason_code: item.reason_code,
+        actionTaken: item.state === "open" ? "queued_for_review" : item.state,
+      };
+    });
 
     const lastSyncTime = latestSync?.completed_at || latestSync?.started_at || null;
     const nextSyncTime = lastSyncTime
@@ -629,5 +645,39 @@ export async function fetchOutreachStats(): Promise<DataResult<OutreachStats>> {
       status: "connection_error",
       error: err?.message || "Failed to load outreach contacts",
     };
+  }
+}
+
+/**
+ * Resolves an open recruitment review item atomically.
+ * Actions: 'approve', 'reject', 'ignore', 'needs_review'.
+ * Only designated owner can resolve; third-party OAuth tokens are rejected.
+ */
+export async function resolveRecruitmentReview(
+  reviewItemId: string,
+  action: "approve" | "reject" | "ignore" | "needs_review",
+  notes?: string,
+  targetApplicationId?: string
+): Promise<{ success: boolean; data?: any; error?: string }> {
+  try {
+    const auth = await getAuthenticatedOwner();
+    if (!auth.success) {
+      return { success: false, error: auth.error };
+    }
+
+    const { data, error } = await auth.client.rpc("jf_owner_resolve_recruitment_review", {
+      p_review_item_id: reviewItemId,
+      p_action: action,
+      p_notes: notes ?? null,
+      p_target_application_id: targetApplicationId ?? null,
+    });
+
+    if (error) {
+      return { success: false, error: error.message };
+    }
+
+    return { success: true, data };
+  } catch (err: any) {
+    return { success: false, error: err?.message || "Failed to resolve review item" };
   }
 }

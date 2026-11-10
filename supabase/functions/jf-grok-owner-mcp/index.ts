@@ -28,6 +28,7 @@ const VALID_CLASSIFICATIONS = [
   'recruiter_follow_up',
   'offer',
   'other_uncertain',
+  'irrelevant_exclusion',
 ] as const;
 
 const handler = pipeline(
@@ -191,10 +192,22 @@ const handler = pipeline(
             evidence_summary: z.string().max(1000),
             ambiguity_notes: z.string().max(1000).optional(),
             idempotency_key: z.string().uuid().optional(),
+            disposition: z.enum(['proposal', 'exclude']).optional().default('proposal'),
           }),
           annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
         },
         async (params) => {
+          if (params.disposition === 'exclude' || params.classification === 'irrelevant_exclusion') {
+            const { data, error } = await ctx.supabase.rpc('jf_grok_exclude_irrelevant_email', {
+              p_queue_id: params.queue_id,
+              p_reason: params.evidence_summary || params.ambiguity_notes || 'Excluded as irrelevant notification',
+              p_confidence: params.confidence,
+              p_idempotency_key: params.idempotency_key ?? null,
+            });
+            if (error) throw new Error(`Failed to exclude email: ${error.message}`);
+            return { content: [{ type: 'text', text: JSON.stringify(data) }] };
+          }
+
           const { data, error } = await ctx.supabase.rpc('jf_grok_submit_classification_proposal', {
             p_queue_id: params.queue_id,
             p_classification: params.classification,
