@@ -37,3 +37,6 @@ supabase/.temp/
 *.tsbuildinfo
 next-env.d.ts
 
+# Editor
+.vscode/
+

@@ -7,6 +7,7 @@ import type {
   OutreachStats,
   OutreachProposal,
   OutreachInteraction,
+  OutreachConversationItem,
   DataResult,
 } from "@/types/dashboard";
 import type {
@@ -963,6 +964,118 @@ export async function fetchContactOutreachThread(
       data: emptyResult,
       status: "connection_error",
       error: err?.message || "Failed to load contact thread",
+    };
+  }
+}
+
+/**
+ * Fetches the conversation inbox list from jobbot.outreach_contacts
+ * ordered by last_interaction_at desc (nulls last), then name.
+ * Includes latest interaction snippet and pending_approval proposal badge.
+ */
+export async function fetchOutreachConversations(): Promise<DataResult<OutreachConversationItem[]>> {
+  try {
+    const auth = await getAuthenticatedOwner();
+    if (!auth.success) {
+      return {
+        data: [],
+        status: auth.reason === "unauthenticated" ? "unauthenticated" : "permission_denied",
+        error: auth.error,
+      };
+    }
+
+    const [contactsRes, interactionsRes, proposalsRes] = await Promise.all([
+      auth.client
+        .from("jf_outreach_contacts")
+        .select("*")
+        .order("last_interaction_at", { ascending: false, nullsFirst: false }),
+      auth.client
+        .from("jf_outreach_interactions")
+        .select("id, contact_id, message_summary, event_at, created_at")
+        .order("event_at", { ascending: false, nullsFirst: false })
+        .order("created_at", { ascending: false }),
+      auth.client
+        .from("jf_outreach_proposals")
+        .select("id, contact_id, state")
+        .eq("state", "pending_approval"),
+    ]);
+
+    if (contactsRes.error) {
+      console.error("[fetchOutreachConversations] contacts error:", contactsRes.error);
+      return {
+        data: [],
+        status: "connection_error",
+        error: contactsRes.error.message,
+      };
+    }
+
+    const rawContacts = contactsRes.data || [];
+    if (rawContacts.length === 0) {
+      return {
+        data: [],
+        status: "empty",
+        error: null,
+      };
+    }
+
+    // Map contacts with pending proposals
+    const pendingProposalSet = new Set<string>();
+    for (const p of proposalsRes.data || []) {
+      if (p.contact_id) {
+        pendingProposalSet.add(p.contact_id);
+      }
+    }
+
+    // Map latest interaction per contact
+    const latestInteractions = new Map<string, { summary: string; time: string | null }>();
+    for (const inter of interactionsRes.data || []) {
+      if (!inter.contact_id) continue;
+      if (!latestInteractions.has(inter.contact_id)) {
+        latestInteractions.set(inter.contact_id, {
+          summary: inter.message_summary || "",
+          time: inter.event_at || inter.created_at || null,
+        });
+      }
+    }
+
+    // Build conversation items
+    const conversations: OutreachConversationItem[] = rawContacts.map((c: any) => {
+      const latest = latestInteractions.get(c.id);
+      const effectiveLastTime = c.last_interaction_at || latest?.time || null;
+      return {
+        id: c.id,
+        full_name: c.full_name || c.name || "Contact",
+        professional_title: c.professional_title || c.role || null,
+        company: c.company || null,
+        connection_stage: c.connection_stage || c.status || "unknown",
+        linkedin_url: c.linkedin_url || null,
+        last_interaction_at: effectiveLastTime,
+        last_message_preview: latest?.summary || null,
+        has_pending_proposal: pendingProposalSet.has(c.id),
+      };
+    });
+
+    // Order by last_interaction_at desc nulls last, then full_name asc
+    conversations.sort((a, b) => {
+      const timeA = a.last_interaction_at ? new Date(a.last_interaction_at).getTime() : 0;
+      const timeB = b.last_interaction_at ? new Date(b.last_interaction_at).getTime() : 0;
+      if (timeB !== timeA) {
+        return timeB - timeA;
+      }
+      return (a.full_name || "").localeCompare(b.full_name || "");
+    });
+
+    return {
+      data: conversations,
+      status: "success",
+      error: null,
+    };
+  } catch (err: any) {
+    console.error("[fetchOutreachConversations] exception:", err);
+    return {
+      data: [],
+      status: "connection_error",
+      error: err?.message || "Failed to load conversations",
     };
   }
 }

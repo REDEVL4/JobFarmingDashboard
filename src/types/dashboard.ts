@@ -3,6 +3,18 @@ import type { DbApplication, DbJob, DbEmailEvent, DbOutreachContact, DbOutreachP
 export type OutreachProposal = DbOutreachProposal;
 export type OutreachInteraction = DbOutreachInteraction;
 
+export interface OutreachConversationItem {
+  id: string;
+  full_name: string;
+  professional_title?: string | null;
+  company?: string | null;
+  connection_stage?: string | null;
+  linkedin_url?: string | null;
+  last_interaction_at?: string | null;
+  last_message_preview?: string | null;
+  has_pending_proposal: boolean;
+}
+
 export type NormalizedStatus =
   | "all"
   | "applied"
