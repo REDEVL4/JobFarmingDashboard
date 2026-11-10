@@ -1079,3 +1079,78 @@ export async function fetchOutreachConversations(): Promise<DataResult<OutreachC
     };
   }
 }
+
+/**
+ * Reads the current outreach mode from public.jf_outreach_settings for the signed-in owner.
+ * Returns "review" | "auto" (defaults to "review").
+ */
+export async function fetchOutreachMode(): Promise<DataResult<"review" | "auto">> {
+  try {
+    const auth = await getAuthenticatedOwner();
+    if (!auth.success) {
+      return {
+        data: "review",
+        status: auth.reason === "unauthenticated" ? "unauthenticated" : "permission_denied",
+        error: auth.error,
+      };
+    }
+
+    const { data, error } = await auth.client
+      .from("jf_outreach_settings")
+      .select("outreach_mode")
+      .eq("owner_id", auth.user.id)
+      .maybeSingle();
+
+    if (error) {
+      console.error("[fetchOutreachMode] error:", error);
+      return {
+        data: "review",
+        status: "connection_error",
+        error: error.message,
+      };
+    }
+
+    const mode = (data?.outreach_mode || "review").toLowerCase() === "auto" ? "auto" : "review";
+    return {
+      data: mode,
+      status: "success",
+      error: null,
+    };
+  } catch (err: any) {
+    console.error("[fetchOutreachMode] exception:", err);
+    return {
+      data: "review",
+      status: "connection_error",
+      error: err?.message || "Failed to load outreach mode",
+    };
+  }
+}
+
+/**
+ * Updates outreach mode by invoking public.set_outreach_mode RPC.
+ */
+export async function setOutreachMode(
+  mode: "review" | "auto"
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    if (!["review", "auto"].includes(mode)) {
+      return { success: false, error: "Invalid outreach mode. Must be 'review' or 'auto'." };
+    }
+
+    const auth = await getAuthenticatedOwner();
+    if (!auth.success) {
+      return { success: false, error: auth.error };
+    }
+
+    const { error } = await auth.client.rpc("set_outreach_mode", { p_mode: mode });
+    if (error) {
+      console.error("[setOutreachMode] RPC error:", error);
+      return { success: false, error: error.message };
+    }
+
+    return { success: true };
+  } catch (err: any) {
+    console.error("[setOutreachMode] exception:", err);
+    return { success: false, error: err?.message || "Failed to set outreach mode" };
+  }
+}

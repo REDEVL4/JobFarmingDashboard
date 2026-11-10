@@ -14,9 +14,12 @@ import {
   Bot,
   Clock,
   ShieldAlert,
+  ShieldCheck,
+  Zap,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn, formatDateTime, formatRelativeTime } from "@/lib/utils";
+import { createClient } from "@/lib/supabase/client";
 import type { DbOutreachContact } from "@/types/database";
 import type {
   OutreachConversationItem,
@@ -30,6 +33,7 @@ interface OutreachInboxProps {
   selectedContact: DbOutreachContact | null;
   initialInteractions: OutreachInteraction[];
   initialProposals: OutreachProposal[];
+  initialOutreachMode?: "review" | "auto";
 }
 
 function getInitials(name: string): string {
@@ -47,10 +51,15 @@ export function OutreachInbox({
   selectedContact,
   initialInteractions,
   initialProposals,
+  initialOutreachMode = "review",
 }: OutreachInboxProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [proposals, setProposals] = useState<OutreachProposal[]>(initialProposals);
   const [interactions, setInteractions] = useState<OutreachInteraction[]>(initialInteractions);
+
+  // Outreach mode state ("review" | "auto")
+  const [outreachMode, setOutreachMode] = useState<"review" | "auto">(initialOutreachMode);
+  const [isUpdatingMode, setIsUpdatingMode] = useState(false);
 
   // Active proposal in pending_approval (or approved_for_send)
   const activeProposal = proposals.find(
@@ -77,6 +86,43 @@ export function OutreachInbox({
     setJustApproved(curr?.state === "approved_for_send");
     setErrorFeedback(null);
   }, [selectedContactId, initialProposals, initialInteractions]);
+
+  // Sync outreach mode if prop updates
+  useEffect(() => {
+    setOutreachMode(initialOutreachMode);
+  }, [initialOutreachMode]);
+
+  const handleModeChange = async (newMode: "review" | "auto") => {
+    if (newMode === outreachMode || isUpdatingMode) return;
+    const previousMode = outreachMode;
+    setOutreachMode(newMode);
+    setIsUpdatingMode(true);
+
+    try {
+      const supabase = createClient();
+      const { error: rpcError } = await supabase.rpc("set_outreach_mode", {
+        p_mode: newMode,
+      });
+
+      if (rpcError) {
+        console.warn("Browser RPC set_outreach_mode warning, falling back to server API:", rpcError);
+        const res = await fetch("/api/outreach/mode", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode: newMode }),
+        });
+        if (!res.ok) {
+          const json = await res.json().catch(() => ({}));
+          throw new Error(json.error || "Failed to update outreach mode");
+        }
+      }
+    } catch (err: any) {
+      console.error("Failed to switch outreach mode:", err);
+      setOutreachMode(previousMode);
+    } finally {
+      setIsUpdatingMode(false);
+    }
+  };
 
   // Filter conversations based on search
   const filteredConversations = conversations.filter((conv) => {
@@ -167,6 +213,11 @@ export function OutreachInbox({
   const contactTitle = selectedContact?.professional_title || selectedContact?.role || "";
   const connectionStage = selectedContact?.connection_stage || selectedContact?.status || "";
 
+  const modeDescription =
+    outreachMode === "review"
+      ? "You approve every draft."
+      : "Messages send without a click. Connection requests still wait for you.";
+
   return (
     <div className="h-[calc(100vh-6.5rem)] md:h-[calc(100vh-8.5rem)] min-h-[580px] rounded-xl border border-border bg-card overflow-hidden flex flex-col md:flex-row shadow-sm">
       {/* ================= LEFT PANE (Conversations List, ~320px) ================= */}
@@ -176,8 +227,50 @@ export function OutreachInbox({
           selectedContactId ? "hidden md:flex" : "flex"
         )}
       >
+        {/* Outreach Mode Control Header on Left Pane */}
+        <div className="p-3 border-b border-border bg-card space-y-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-bold text-foreground">Outreach Mode</span>
+            <div className="inline-flex items-center bg-muted/80 p-0.5 rounded-lg border border-border">
+              <button
+                type="button"
+                disabled={isUpdatingMode}
+                onClick={() => handleModeChange("review")}
+                className={cn(
+                  "px-2.5 py-1 text-[11px] font-semibold rounded-md transition-all flex items-center gap-1 cursor-pointer",
+                  outreachMode === "review"
+                    ? "bg-background text-foreground shadow-xs font-bold"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+                title="Review: You approve every draft."
+              >
+                <ShieldCheck className="h-3 w-3" />
+                <span>Review</span>
+              </button>
+              <button
+                type="button"
+                disabled={isUpdatingMode}
+                onClick={() => handleModeChange("auto")}
+                className={cn(
+                  "px-2.5 py-1 text-[11px] font-semibold rounded-md transition-all flex items-center gap-1 cursor-pointer",
+                  outreachMode === "auto"
+                    ? "bg-emerald-600 text-white shadow-xs font-bold"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+                title="Auto: Messages send without a click. Connection requests still wait for you."
+              >
+                <Zap className="h-3 w-3" />
+                <span>Auto</span>
+              </button>
+            </div>
+          </div>
+          <p className="text-[10px] text-muted-foreground leading-tight">
+            {modeDescription}
+          </p>
+        </div>
+
         {/* Search Header */}
-        <div className="p-3 border-b border-border bg-card">
+        <div className="p-3 border-b border-border bg-card/50">
           <div className="relative">
             <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
             <input
@@ -290,7 +383,7 @@ export function OutreachInbox({
           </div>
         ) : (
           <>
-            {/* Thread Header */}
+            {/* Thread Header with Outreach Mode Control & Contact Details */}
             <header className="h-14 px-4 border-b border-border bg-card/60 backdrop-blur-xs flex items-center justify-between gap-3 shrink-0">
               <div className="flex items-center gap-2.5 min-w-0">
                 {/* Mobile Back Button */}
@@ -322,19 +415,67 @@ export function OutreachInbox({
                 </div>
               </div>
 
-              {/* LinkedIn Link */}
-              {selectedContact.linkedin_url && (
-                <a
-                  href={selectedContact.linkedin_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-border bg-background text-[11px] font-medium text-foreground hover:bg-muted transition-colors shrink-0"
-                >
-                  <Linkedin className="h-3.5 w-3.5 text-sky-600" />
-                  <span className="hidden sm:inline">LinkedIn</span>
-                  <ExternalLink className="h-3 w-3 opacity-60" />
-                </a>
-              )}
+              {/* Header Right Actions: Mode Switch + LinkedIn Link */}
+              <div className="flex items-center gap-3 shrink-0">
+                {/* Two-state Outreach Mode Switch (Header Control) */}
+                <div className="flex flex-col items-end text-right">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[10px] uppercase font-semibold text-muted-foreground tracking-wider hidden sm:inline">
+                      Mode:
+                    </span>
+                    <div className="inline-flex items-center bg-muted/80 p-0.5 rounded-lg border border-border text-[11px]">
+                      <button
+                        type="button"
+                        disabled={isUpdatingMode}
+                        onClick={() => handleModeChange("review")}
+                        className={cn(
+                          "px-2 py-0.5 rounded font-medium transition-all cursor-pointer",
+                          outreachMode === "review"
+                            ? "bg-background text-foreground shadow-xs font-bold"
+                            : "text-muted-foreground hover:text-foreground"
+                        )}
+                        title="You approve every draft."
+                      >
+                        Review
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isUpdatingMode}
+                        onClick={() => handleModeChange("auto")}
+                        className={cn(
+                          "px-2 py-0.5 rounded font-medium transition-all cursor-pointer",
+                          outreachMode === "auto"
+                            ? "bg-emerald-600 text-white shadow-xs font-bold"
+                            : "text-muted-foreground hover:text-foreground"
+                        )}
+                        title="Messages send without a click. Connection requests still wait for you."
+                      >
+                        Auto
+                      </button>
+                    </div>
+                  </div>
+                  <span
+                    className="text-[9px] text-muted-foreground hidden lg:inline max-w-[260px] truncate"
+                    title={modeDescription}
+                  >
+                    {modeDescription}
+                  </span>
+                </div>
+
+                {/* LinkedIn Link */}
+                {selectedContact.linkedin_url && (
+                  <a
+                    href={selectedContact.linkedin_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-border bg-background text-[11px] font-medium text-foreground hover:bg-muted transition-colors shrink-0"
+                  >
+                    <Linkedin className="h-3.5 w-3.5 text-sky-600" />
+                    <span className="hidden sm:inline">LinkedIn</span>
+                    <ExternalLink className="h-3 w-3 opacity-60" />
+                  </a>
+                )}
+              </div>
             </header>
 
             {/* Scrollable Message Thread */}
@@ -398,11 +539,13 @@ export function OutreachInbox({
                     className="w-full resize-none p-2.5 text-xs bg-muted/30 text-muted-foreground border border-input rounded-lg cursor-not-allowed opacity-80"
                   />
                   <p className="text-[11px] text-muted-foreground">
-                    Bot will draft the next message. You approve before anything is sent.
+                    {outreachMode === "auto"
+                      ? "Messages send without a click. Connection requests still wait for you."
+                      : "Bot will draft the next message. You approve before anything is sent."}
                   </p>
                 </div>
               ) : activeProposal && activeProposal.state === "pending_approval" ? (
-                /* Editable Composer for Pending Proposal */
+                /* Editable Composer for Pending Proposal (Always kept per requirement 7) */
                 <div className="space-y-2">
                   <div className="flex items-center justify-between text-[11px] text-muted-foreground">
                     <span className="font-semibold text-foreground flex items-center gap-1.5">
@@ -479,7 +622,9 @@ export function OutreachInbox({
                     className="w-full resize-none p-3 text-xs bg-muted/40 text-muted-foreground border border-input rounded-lg cursor-not-allowed placeholder:text-muted-foreground/60 focus:outline-none"
                   />
                   <p className="text-[11px] text-muted-foreground">
-                    Bot will draft the next message. You approve before anything is sent.
+                    {outreachMode === "auto"
+                      ? "Messages send without a click. Connection requests still wait for you."
+                      : "Bot will draft the next message. You approve before anything is sent."}
                   </p>
                 </div>
               )}
@@ -490,4 +635,3 @@ export function OutreachInbox({
     </div>
   );
 }
-
