@@ -1,7 +1,8 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef, useTransition } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   Search,
   ExternalLink,
@@ -53,6 +54,11 @@ export function OutreachInbox({
   initialProposals,
   initialOutreachMode = "review",
 }: OutreachInboxProps) {
+  const router = useRouter();
+  const [isPending, startTransition] = useTransition();
+  const [isManualRefreshing, setIsManualRefreshing] = useState(false);
+  const isRefreshing = isPending || isManualRefreshing;
+
   const [searchQuery, setSearchQuery] = useState("");
   const [proposals, setProposals] = useState<OutreachProposal[]>(initialProposals);
   const [interactions, setInteractions] = useState<OutreachInteraction[]>(initialInteractions);
@@ -75,17 +81,119 @@ export function OutreachInbox({
   );
   const [errorFeedback, setErrorFeedback] = useState<string | null>(null);
 
-  // Sync state when selected contact or proposals change
+  // Refs to preserve user edits during refreshes
+  const savedProposalTextRef = useRef<string>(
+    activeProposal?.approved_text || activeProposal?.proposed_text || ""
+  );
+  const prevContactIdRef = useRef<string | null>(selectedContactId);
+  const prevProposalIdRef = useRef<string | null>(activeProposal?.id || null);
+
+  // Sync state when selected contact or proposals change from server
   useEffect(() => {
     setProposals(initialProposals);
     setInteractions(initialInteractions);
+
     const curr = initialProposals.find(
       (p) => p.state === "pending_approval" || p.state === "approved_for_send"
     );
-    setComposerText(curr?.approved_text || curr?.proposed_text || "");
+    const newSavedText = curr?.approved_text || curr?.proposed_text || "";
+    const isDifferentContact = selectedContactId !== prevContactIdRef.current;
+    const isDifferentProposal = (curr?.id || null) !== prevProposalIdRef.current;
+
     setJustApproved(curr?.state === "approved_for_send");
     setErrorFeedback(null);
+
+    if (isDifferentContact || isDifferentProposal) {
+      // Switched contact or proposal: load the new proposal text
+      setComposerText(newSavedText);
+      savedProposalTextRef.current = newSavedText;
+      prevContactIdRef.current = selectedContactId;
+      prevProposalIdRef.current = curr?.id || null;
+    } else {
+      // Same contact and proposal on server refresh:
+      // Do not clear the composer if the user has edited the draft text and it differs from the saved proposal text
+      setComposerText((prevText) => {
+        const userHasEdited =
+          prevText !== savedProposalTextRef.current && prevText !== newSavedText;
+        if (userHasEdited) {
+          return prevText; // Preserve user's edited draft
+        }
+        return newSavedText;
+      });
+      savedProposalTextRef.current = newSavedText;
+    }
   }, [selectedContactId, initialProposals, initialInteractions]);
+
+  // Periodic background refresh every 5 minutes while tab is visible.
+  // Pauses when document.hidden is true, and refreshes once when tab becomes visible again.
+  useEffect(() => {
+    const FIVE_MINUTES_MS = 5 * 60 * 1000;
+    let timerId: NodeJS.Timeout | null = null;
+    let wasHidden = false;
+
+    const startTimer = () => {
+      if (timerId) clearInterval(timerId);
+      timerId = setInterval(() => {
+        if (typeof document !== "undefined" && !document.hidden) {
+          startTransition(() => {
+            router.refresh();
+          });
+        }
+      }, FIVE_MINUTES_MS);
+    };
+
+    const stopTimer = () => {
+      if (timerId) {
+        clearInterval(timerId);
+        timerId = null;
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (typeof document === "undefined") return;
+      if (document.hidden) {
+        wasHidden = true;
+        stopTimer();
+      } else {
+        if (wasHidden) {
+          wasHidden = false;
+          startTransition(() => {
+            router.refresh();
+          });
+        }
+        startTimer();
+      }
+    };
+
+    if (typeof document !== "undefined") {
+      if (!document.hidden) {
+        startTimer();
+      } else {
+        wasHidden = true;
+      }
+      document.addEventListener("visibilitychange", handleVisibilityChange);
+    }
+
+    return () => {
+      stopTimer();
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", handleVisibilityChange);
+      }
+    };
+  }, [router]);
+
+  // Manual refresh button click handler
+  const handleManualRefresh = () => {
+    if (isRefreshing) return;
+    setIsManualRefreshing(true);
+    startTransition(() => {
+      router.refresh();
+    });
+    // Ensure smooth spin feedback for at least 600ms
+    setTimeout(() => {
+      setIsManualRefreshing(false);
+    }, 600);
+  };
 
   // Sync outreach mode if prop updates
   useEffect(() => {
@@ -383,7 +491,7 @@ export function OutreachInbox({
           </div>
         ) : (
           <>
-            {/* Thread Header with Outreach Mode Control & Contact Details */}
+            {/* Thread Header with Outreach Mode Control, Refresh & Contact Details */}
             <header className="h-14 px-4 border-b border-border bg-card/60 backdrop-blur-xs flex items-center justify-between gap-3 shrink-0">
               <div className="flex items-center gap-2.5 min-w-0">
                 {/* Mobile Back Button */}
@@ -415,8 +523,8 @@ export function OutreachInbox({
                 </div>
               </div>
 
-              {/* Header Right Actions: Mode Switch + LinkedIn Link */}
-              <div className="flex items-center gap-3 shrink-0">
+              {/* Header Right Actions: Mode Switch + Refresh + LinkedIn Link */}
+              <div className="flex items-center gap-2 sm:gap-3 shrink-0">
                 {/* Two-state Outreach Mode Switch (Header Control) */}
                 <div className="flex flex-col items-end text-right">
                   <div className="flex items-center gap-1.5">
@@ -461,6 +569,19 @@ export function OutreachInbox({
                     {modeDescription}
                   </span>
                 </div>
+
+                {/* Refresh Button */}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={isRefreshing}
+                  onClick={handleManualRefresh}
+                  className="h-7 px-2 sm:px-2.5 text-[11px] font-medium gap-1.5 border-border bg-background hover:bg-muted text-foreground transition-colors shrink-0"
+                  title="Refresh messages and proposals"
+                >
+                  <RotateCw className={cn("h-3.5 w-3.5", isRefreshing && "animate-spin")} />
+                  <span className="hidden sm:inline">Refresh</span>
+                </Button>
 
                 {/* LinkedIn Link */}
                 {selectedContact.linkedin_url && (
