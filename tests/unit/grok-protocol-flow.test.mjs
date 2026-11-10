@@ -428,3 +428,4 @@ test('Grok Protocol Flow: OAuth security safeguards remain intact', async () => 
   const badToolData = await badToolRes.json();
   assert.equal(badToolData.error.code, -32601);
 });
+
