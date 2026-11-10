@@ -1,12 +1,14 @@
 export const DESIGNATED_OWNER_UUID = "f2729195-5445-4272-ab85-cac5b03b0967";
 export const DESIGNATED_OWNER_EMAIL = "govardhanreddy.vys7@gmail.com";
 
-// Verified Grok connector callback URI
+// Strict callback allowlist. Cursor is limited to one explicitly reviewed client ID.
 export const VERIFIED_GROK_CALLBACK_URI = "https://grok.com/connectors-oauth-exchange-code/";
+export const VERIFIED_CURSOR_CALLBACK_URI = "https://www.cursor.com/agents/mcp/oauth/callback";
+export const APPROVED_CURSOR_CLIENT_ID = "cad36a3f-674b-464f-a90f-8ab9b661218d";
 
-// Active approved redirect URIs (single verified Grok connector URI)
 export const TRUSTED_REDIRECT_URIS = [
   VERIFIED_GROK_CALLBACK_URI,
+  VERIFIED_CURSOR_CALLBACK_URI,
 ];
 
 // Reference Grok OAuth client ID (historical registration)
@@ -131,7 +133,7 @@ export function parseScopes(scopeString: string | null | undefined): string[] {
 export type ClientTrustResult =
   | {
       trusted: true;
-      connector: "grok";
+      connector: "grok" | "cursor";
       isKnownStatic: boolean;
       isDynamicRegistration: boolean;
       clientName: string;
@@ -150,13 +152,14 @@ export type ClientTrustResult =
     };
 
 /**
- * Permanent Grok OAuth Client verification:
- * Supports dynamically registered Grok clients while preventing arbitrary client registrations.
+ * OAuth client verification:
+ * Preserves dynamically registered Grok clients and allows one specifically
+ * reviewed Cursor registration. Arbitrary Cursor registrations remain denied.
  *
  * Requirements:
  * 1. Valid UUID client identifier.
- * 2. Exact approved Grok callback URI (https://grok.com/connectors-oauth-exchange-code/).
- * 3. Verified client metadata matching Grok connector name.
+ * 2. Exact approved callback URI for that client.
+ * 3. Grok metadata requirements or exact approved Cursor ID and name.
  * 4. Requires explicit interactive owner consent before authorization code is issued.
  */
 export function validateOAuthClient(
@@ -181,8 +184,34 @@ export function validateOAuthClient(
   }
 
   const trimmedRedirect = redirectUri.trim();
+  const clientName = client.name?.trim() || "";
 
-  // 1. Strict callback URI verification: must match approved Grok connector callback exactly
+  // Cursor access is pinned to the single owner-reviewed registration. Client
+  // names alone are not trusted because OAuth dynamic registration is enabled.
+  if (trimmedRedirect === VERIFIED_CURSOR_CALLBACK_URI) {
+    if (client.id !== APPROVED_CURSOR_CLIENT_ID || clientName !== "Cursor") {
+      return {
+        trusted: false,
+        reason: "Cursor OAuth registration is not approved. Only the verified owner-reviewed Cursor client ID can use this callback.",
+        connector: "cursor",
+        clientId: client.id,
+        redirectUri: trimmedRedirect,
+      };
+    }
+
+    return {
+      trusted: true,
+      connector: "cursor",
+      isKnownStatic: true,
+      isDynamicRegistration: false,
+      clientName,
+      clientId: client.id,
+      redirectUri: trimmedRedirect,
+      requiresInteractiveConsent: true,
+    };
+  }
+
+  // 1. Strict callback URI verification: preserve existing Grok-only policy
   if (trimmedRedirect !== VERIFIED_GROK_CALLBACK_URI) {
     return {
       trusted: false,
@@ -194,7 +223,6 @@ export function validateOAuthClient(
   }
 
   // 2. Client metadata verification: must match Grok connector name
-  const clientName = client.name?.trim() || "";
   if (!/^Grok/i.test(clientName)) {
     return {
       trusted: false,

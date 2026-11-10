@@ -8,6 +8,8 @@ import {
   TRUSTED_STATIC_CLIENT_IDS,
   TRUSTED_OAUTH_CLIENT_IDS,
   VERIFIED_GROK_CALLBACK_URI,
+  VERIFIED_CURSOR_CALLBACK_URI,
+  APPROVED_CURSOR_CLIENT_ID,
   STANDARD_SCOPES,
   validateAuthorizationId,
   validateOwnerAccess,
@@ -536,3 +538,39 @@ test("OAuth Migration: defines server-side validator checking registered client,
   assert.match(migrationSql, /jobbot\.validate_grok_oauth_client\(v_client_id::uuid, v_uid\)/);
 });
 
+
+
+// ---------------------------------------------------------------------------
+// 15. Explicitly reviewed Cursor Desktop registration (no arbitrary clients)
+// ---------------------------------------------------------------------------
+test("OAuth: approves only the specifically reviewed Cursor client registration", () => {
+  const approved = validateOAuthClient(
+    { id: APPROVED_CURSOR_CLIENT_ID, name: "Cursor" },
+    VERIFIED_CURSOR_CALLBACK_URI
+  );
+  assert.equal(approved.trusted, true);
+  assert.equal(approved.connector, "cursor");
+  assert.equal(approved.requiresInteractiveConsent, true);
+  assert.equal(approved.isKnownStatic, true);
+
+  assert.equal(validateOAuthClient(
+    { id: "7a493089-0500-4b0d-8a00-12140c16ac52", name: "Cursor" },
+    VERIFIED_CURSOR_CALLBACK_URI
+  ).trusted, false);
+  assert.equal(validateOAuthClient(
+    { id: APPROVED_CURSOR_CLIENT_ID, name: "Impostor" },
+    VERIFIED_CURSOR_CALLBACK_URI
+  ).trusted, false);
+  assert.equal(validateOAuthClient(
+    { id: APPROVED_CURSOR_CLIENT_ID, name: "Cursor" },
+    "https://evil.example/callback"
+  ).trusted, false);
+  assert.equal(validateOAuthClient(
+    { id: APPROVED_CURSOR_CLIENT_ID, name: "Cursor" },
+    VERIFIED_GROK_CALLBACK_URI
+  ).trusted, false);
+  assert.equal(validateOAuthClient(
+    { id: ACTIVE_GROK_CLIENT_ID, name: "Grok" },
+    VERIFIED_GROK_CALLBACK_URI
+  ).trusted, true);
+});
