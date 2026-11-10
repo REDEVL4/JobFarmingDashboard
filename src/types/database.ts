@@ -198,6 +198,25 @@ export interface DbOutreachProposal {
   updated_at: string;
 }
 
+export interface DbOutreachInteraction {
+  id: string;
+  owner_id?: string;
+  contact_id: string;
+  action_id?: string | null;
+  revision_id?: string | null;
+  event_type: string;
+  channel: string;
+  direction?: "inbound" | "outbound" | string | null;
+  message_summary?: string | null;
+  event_at?: string | null;
+  verification?: string;
+  evidence_source?: string | null;
+  evidence_ref?: string | null;
+  application_id?: string | null;
+  external_key?: string | null;
+  created_at: string;
+}
+
 export interface DbSyncLogVerificationResults {
   status?: string;
   mailbox?: string;

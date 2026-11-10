@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
+import Link from "next/link";
 import {
   Users,
   ShieldAlert,
@@ -307,9 +308,12 @@ export function OutreachClient({ initialStats, initialProposals = [], status, er
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                     <div className="space-y-1">
                       <div className="flex items-center gap-2 flex-wrap">
-                        <span className="font-bold text-sm text-foreground">
+                        <Link
+                          href={`/outreach/${contact.id}`}
+                          className="font-bold text-sm text-foreground hover:text-primary hover:underline transition-colors"
+                        >
                           #{idx + 1} {contact.name}
-                        </span>
+                        </Link>
                         <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase tracking-wider bg-brand-500/10 text-brand-600 dark:text-brand-400">
                           {contact.contact_type}
                         </span>

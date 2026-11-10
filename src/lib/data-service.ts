@@ -6,6 +6,7 @@ import type {
   GmailMonitoringStats,
   OutreachStats,
   OutreachProposal,
+  OutreachInteraction,
   DataResult,
 } from "@/types/dashboard";
 import type {
@@ -766,10 +767,12 @@ export async function resolveOutreachProposal(
       const channel = (current.channel || "").toLowerCase();
       const actionType = (current.action_type || "").toLowerCase();
 
-      let targetState = "draft_ready";
+      let targetState = "approved_for_send";
       if (channel === "gmail") {
         targetState = "queued";
-      } else if (channel === "linkedin" || actionType === "handoff_to_job_bot") {
+      } else if (channel === "linkedin") {
+        targetState = "approved_for_send";
+      } else if (actionType === "handoff_to_job_bot") {
         targetState = "draft_ready";
       }
 
@@ -848,5 +851,118 @@ export async function resolveRecruitmentReview(
     return { success: true, data };
   } catch (err: any) {
     return { success: false, error: err?.message || "Failed to resolve review item" };
+  }
+}
+
+export interface ContactThreadData {
+  contact: DbOutreachContact | null;
+  interactions: OutreachInteraction[];
+  proposals: OutreachProposal[];
+}
+
+/**
+ * Fetches contact details, interactions, and open proposals for /outreach/[contactId].
+ * - contact from jobbot.outreach_contacts
+ * - interactions from jobbot.outreach_interactions for contact_id ordered by event_at
+ * - proposals from jobbot.outreach_proposals for contact_id where state in ('pending_approval', 'approved_for_send')
+ */
+export async function fetchContactOutreachThread(
+  contactId: string
+): Promise<DataResult<ContactThreadData>> {
+  const emptyResult: ContactThreadData = {
+    contact: null,
+    interactions: [],
+    proposals: [],
+  };
+
+  try {
+    const auth = await getAuthenticatedOwner();
+    if (!auth.success) {
+      return {
+        data: emptyResult,
+        status: auth.reason === "unauthenticated" ? "unauthenticated" : "permission_denied",
+        error: auth.error,
+      };
+    }
+
+    // 1. Fetch contact
+    const contactRes = await auth.client
+      .from("jf_outreach_contacts")
+      .select("*")
+      .eq("id", contactId)
+      .maybeSingle();
+
+    if (contactRes.error) {
+      console.error("[fetchContactOutreachThread] contact query error:", contactRes.error);
+      return {
+        data: emptyResult,
+        status: "connection_error",
+        error: contactRes.error.message,
+      };
+    }
+
+    if (!contactRes.data) {
+      return {
+        data: emptyResult,
+        status: "empty",
+        error: "Contact not found.",
+      };
+    }
+
+    const contact: DbOutreachContact = {
+      id: contactRes.data.id,
+      name: contactRes.data.full_name || contactRes.data.name || "Contact",
+      full_name: contactRes.data.full_name,
+      company: contactRes.data.company || "Unknown Company",
+      role: contactRes.data.professional_title || contactRes.data.role || "Recruiter",
+      professional_title: contactRes.data.professional_title,
+      category: contactRes.data.category || contactRes.data.contact_type || "recruiter",
+      contact_type: contactRes.data.category || contactRes.data.contact_type || "recruiter",
+      status: contactRes.data.connection_stage || contactRes.data.status || "draft_pending_approval",
+      connection_stage: contactRes.data.connection_stage,
+      score: typeof contactRes.data.relevance_score === "number" ? contactRes.data.relevance_score : contactRes.data.score || 90,
+      linkedin_url: contactRes.data.linkedin_url || "",
+      connection_note: contactRes.data.personalization_context || contactRes.data.connection_note || "",
+      notes: contactRes.data.notes,
+      created_at: contactRes.data.created_at,
+      updated_at: contactRes.data.updated_at || contactRes.data.created_at,
+    };
+
+    // 2. Fetch interactions for contact, ordered by event_at ASC
+    const interactionsRes = await auth.client
+      .from("jf_outreach_interactions")
+      .select("*")
+      .eq("contact_id", contactId)
+      .order("event_at", { ascending: true, nullsFirst: false })
+      .order("created_at", { ascending: true });
+
+    const interactions: OutreachInteraction[] = (interactionsRes.data || []) as OutreachInteraction[];
+
+    // 3. Fetch proposals for contact where state in ('pending_approval', 'approved_for_send')
+    const proposalsRes = await auth.client
+      .from("jf_outreach_proposals")
+      .select("*")
+      .eq("contact_id", contactId)
+      .in("state", ["pending_approval", "approved_for_send"])
+      .order("created_at", { ascending: true });
+
+    const proposals: OutreachProposal[] = (proposalsRes.data || []) as OutreachProposal[];
+
+    return {
+      data: {
+        contact,
+        interactions,
+        proposals,
+      },
+      status: "success",
+      error: null,
+    };
+  } catch (err: any) {
+    console.error("[fetchContactOutreachThread] exception:", err);
+    return {
+      data: emptyResult,
+      status: "connection_error",
+      error: err?.message || "Failed to load contact thread",
+    };
   }
 }
