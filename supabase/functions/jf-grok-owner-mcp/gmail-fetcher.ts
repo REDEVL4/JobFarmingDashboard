@@ -1,4 +1,3 @@
-import { createClient } from "npm:@supabase/supabase-js@2.49.1";
 import { checkSensitiveMessage, sanitizeText } from "./sensitive-filter.ts";
 
 export interface SanitizedEmailResult {
@@ -14,20 +13,38 @@ export interface SanitizedEmailResult {
   snippet: string;
 }
 
-// Internal service-role client initialized in-memory strictly for Vault credential retrieval
-let cachedAdminClient: any = null;
-function getAdminClient() {
-  if (!cachedAdminClient) {
-    const supabaseUrl = Deno.env.get("SUPABASE_URL");
-    const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-    if (!supabaseUrl || !serviceRoleKey) {
-      throw new Error("Server-side configuration error: missing service environment variables");
-    }
-    cachedAdminClient = createClient(supabaseUrl, serviceRoleKey, {
-      auth: { persistSession: false, autoRefreshToken: false },
-    });
+/**
+ * Retrieves Gmail OAuth credentials via direct server-role PostgREST RPC call.
+ * Uses native fetch in-memory so credentials are never accessible to client sessions or logged.
+ */
+async function getGmailFetchCredentials(): Promise<{ client_id: string; client_secret: string; refresh_token: string }> {
+  const supabaseUrl = Deno.env.get("SUPABASE_URL");
+  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (!supabaseUrl || !serviceRoleKey) {
+    throw new Error("Server-side configuration error: missing service environment variables");
   }
-  return cachedAdminClient;
+
+  const res = await fetch(`${supabaseUrl}/rest/v1/rpc/jf_get_gmail_fetch_credentials`, {
+    method: "POST",
+    headers: {
+      "apikey": serviceRoleKey,
+      "Authorization": `Bearer ${serviceRoleKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({}),
+    signal: AbortSignal.timeout(10_000),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new Error(`Gmail credentials retrieval failed (HTTP ${res.status}): ${errText}`);
+  }
+
+  const creds = await res.json();
+  if (!creds?.client_id || !creds?.client_secret || !creds?.refresh_token) {
+    throw new Error("Gmail OAuth credentials unavailable in Vault");
+  }
+  return creds;
 }
 
 function extractBodyFromParts(payload: any): string {
@@ -85,12 +102,8 @@ export async function fetchAndSanitizeQueuedEmail(
     sender_clean: string;
   }
 ): Promise<SanitizedEmailResult> {
-  // 1. Retrieve credentials via service_role admin client (not user-scoped client)
-  const adminClient = getAdminClient();
-  const { data: creds, error: credsError } = await adminClient.rpc("jf_get_gmail_fetch_credentials");
-  if (credsError || !creds?.client_id || !creds?.client_secret || !creds?.refresh_token) {
-    throw new Error("Gmail OAuth credentials unavailable in Vault");
-  }
+  // 1. Retrieve credentials via server-role PostgREST RPC call (server-side only, never exposed to user)
+  const creds = await getGmailFetchCredentials();
 
   // 2. Exchange refresh token for short-lived access token
   const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
