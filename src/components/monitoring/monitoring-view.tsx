@@ -122,7 +122,7 @@ export function MonitoringView({ initialStats, fetchStatus, errorMessage }: Moni
             Recruitment Email Telemetry & Review
           </h1>
           <p className="text-xs text-muted-foreground mt-1">
-            Independent Supabase monitoring service replacing ChatGPT Status Agent. Real-time telemetry, classification breakdown, and human review queue.
+            Automated recruitment intelligence pipeline. Clear high-confidence classifications are auto-approved every 10 minutes; ambiguous correspondence is held in the review queue.
           </p>
         </div>
 
@@ -133,9 +133,10 @@ export function MonitoringView({ initialStats, fetchStatus, errorMessage }: Moni
             onClick={() => handleTriggerDryRun(false)}
             disabled={isTriggeringDryRun}
             className="h-8 text-xs gap-1.5 border-sky-500/30 text-sky-600 dark:text-sky-400 hover:bg-sky-500/10"
+            title="Runs ingestion diagnostic to evaluate incoming messages"
           >
             <Play className={`h-3.5 w-3.5 ${isTriggeringDryRun ? "animate-spin" : ""}`} />
-            <span>{isTriggeringDryRun ? "Running Dry-Run..." : "Test Dry-Run"}</span>
+            <span>{isTriggeringDryRun ? "Running Diagnostic..." : "Test Ingestion"}</span>
           </Button>
 
           <Button
@@ -149,6 +150,22 @@ export function MonitoringView({ initialStats, fetchStatus, errorMessage }: Moni
             <RotateCw className={`h-3.5 w-3.5 ${isTriggeringDryRun ? "animate-spin" : ""}`} />
             <span>Reconcile Gap (Nov 8)</span>
           </Button>
+        </div>
+      </div>
+
+      {/* Auto-Approve Automation Status Banner */}
+      <div className="p-3.5 rounded-xl border border-sky-500/30 bg-sky-500/5 text-xs flex items-start gap-3">
+        <Sparkles className="h-4 w-4 text-sky-500 shrink-0 mt-0.5" />
+        <div className="space-y-0.5">
+          <p className="font-semibold text-foreground flex items-center gap-2">
+            <span>Automated Classification Pipeline Active</span>
+            <span className="text-[10px] px-2 py-0.5 rounded-full font-mono font-medium bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
+              10-Minute Cron
+            </span>
+          </p>
+          <p className="text-muted-foreground leading-relaxed">
+            High-confidence classifications (rejections, confirmations, interview invitations, assessments, offers) with 0 or 1 matching application are automatically resolved every 10 minutes. Zero-candidate items automatically create a new opportunity and application with the applied stage. Only ambiguous or multi-candidate emails remain in the queue below for human decision.
+          </p>
         </div>
       </div>
 
@@ -247,13 +264,14 @@ export function MonitoringView({ initialStats, fetchStatus, errorMessage }: Moni
         <Card className="border-l-4 border-l-sky-500">
           <CardContent className="p-4 space-y-1">
             <div className="flex items-center justify-between text-xs text-muted-foreground font-semibold">
-              <span>Hourly Scheduler</span>
-              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-600 font-semibold">
-                {stats.schedulerCron}
+              <span>Recruitment Automation</span>
+              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-semibold border border-emerald-500/20">
+                10m Cycle
               </span>
             </div>
-            <div className="text-lg font-bold text-foreground">
-              {stats.dryRunEnabled ? "Dry-Run Active" : "Scheduled"}
+            <div className="text-lg font-bold text-foreground flex items-center gap-2">
+              <span>Auto-Approve Active</span>
+              <span className="w-2 h-2 rounded-full bg-emerald-500" />
             </div>
             <p className="text-[11px] text-muted-foreground">
               Last batch: {stats.lastSyncAt ? formatDateTime(stats.lastSyncAt) : "Nov 8, 2026 ~22:47 UTC"}
@@ -272,7 +290,7 @@ export function MonitoringView({ initialStats, fetchStatus, errorMessage }: Moni
               {stats.emailsEvaluatedCount} evaluated
             </div>
             <p className="text-[11px] text-muted-foreground">
-              {stats.statusChangesConfirmedCount} updates verified in database
+              {stats.statusChangesConfirmedCount} updates verified & auto-applied in database
             </p>
           </CardContent>
         </Card>
@@ -281,12 +299,12 @@ export function MonitoringView({ initialStats, fetchStatus, errorMessage }: Moni
         <Card className="border-l-4 border-l-amber-500">
           <CardContent className="p-4 space-y-1">
             <div className="flex items-center justify-between text-xs text-muted-foreground font-semibold">
-              <span>Review Queue</span>
+              <span>Action Queue</span>
               <AlertTriangle className="h-4 w-4 text-amber-500" />
             </div>
             <div className="text-lg font-bold text-foreground">{stats.needsReviewCount} items</div>
             <p className="text-[11px] text-muted-foreground">
-              Ambiguous employer correspondence
+              Ambiguous / low-confidence cases needing review
             </p>
           </CardContent>
         </Card>
@@ -299,7 +317,7 @@ export function MonitoringView({ initialStats, fetchStatus, errorMessage }: Moni
             <div>
               <CardTitle className="text-base font-semibold">Recruitment Email Classifications</CardTitle>
               <CardDescription className="text-xs">
-                Derived directly from verified recruitment review and status change records
+                Derived directly from verified recruitment review records and auto-approved hiring stage updates
               </CardDescription>
             </div>
             <span className="text-xs font-mono text-muted-foreground">
@@ -352,7 +370,7 @@ export function MonitoringView({ initialStats, fetchStatus, errorMessage }: Moni
 
             <div className="p-3 rounded-lg border bg-sky-500/5 border-sky-500/20 text-center">
               <span className="text-[11px] text-sky-600 dark:text-sky-400 font-semibold block">
-                Awaiting Review
+                Needs Attention
               </span>
               <span className="text-2xl font-bold text-foreground">
                 {stats.classificationBreakdown.acknowledgments}
@@ -369,14 +387,14 @@ export function MonitoringView({ initialStats, fetchStatus, errorMessage }: Moni
             <div>
               <CardTitle className="text-base font-semibold flex items-center gap-2">
                 <AlertTriangle className="h-4 w-4 text-amber-500" />
-                Active Review Queue ({stats.needsReviewCount} Items)
+                Active Review Queue — Ambiguous & Low-Confidence ({stats.needsReviewCount} Items)
               </CardTitle>
               <CardDescription className="text-xs">
-                Real records from `jobbot.recruitment_review_items` requiring manual confirmation
+                Clear high-confidence cases are auto-approved every 10 minutes. Only items with multiple candidate matches or low confidence require human disambiguation.
               </CardDescription>
             </div>
             <span className="text-[11px] px-2.5 py-1 rounded bg-muted text-muted-foreground font-mono">
-              Status: Safe / Stage Unchanged
+              Auto-Approve Active • Manual Selection Only
             </span>
           </div>
         </CardHeader>
@@ -384,8 +402,10 @@ export function MonitoringView({ initialStats, fetchStatus, errorMessage }: Moni
           {stats.events.length === 0 ? (
             <div className="p-12 text-center space-y-2">
               <Inbox className="h-8 w-8 text-muted-foreground mx-auto" />
-              <p className="text-sm font-semibold text-foreground">Review Queue Empty</p>
-              <p className="text-xs text-muted-foreground">All correspondence has been processed.</p>
+              <p className="text-sm font-semibold text-foreground">Review Queue Clear</p>
+              <p className="text-xs text-muted-foreground max-w-sm mx-auto">
+                All high-confidence recruitment emails were automatically approved and applied to applications. Only ambiguous correspondence requiring human selection will appear here.
+              </p>
             </div>
           ) : (
             <div className="divide-y text-xs max-h-[550px] overflow-y-auto">

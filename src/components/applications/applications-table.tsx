@@ -19,6 +19,7 @@ import {
   SlidersHorizontal,
   Bookmark,
   Check,
+  Sparkles,
 } from "lucide-react";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
@@ -44,12 +45,25 @@ const STATUS_TABS: { label: string; value: NormalizedStatus | "all" }[] = [
 ];
 
 const SAVED_VIEWS = [
-  { name: "Default View", statuses: ["all"] as (NormalizedStatus | "all")[] },
-  { name: "Interviews Active", statuses: ["interviewing"] as (NormalizedStatus | "all")[] },
-  { name: "Awaiting Response", statuses: ["applied", "under_review"] as (NormalizedStatus | "all")[] },
-  { name: "Action Required", statuses: ["assessment", "pending"] as (NormalizedStatus | "all")[] },
-  { name: "Rejected / Closed", statuses: ["rejected", "withdrawn"] as (NormalizedStatus | "all")[] },
+  { name: "Default View", statuses: ["all"] as (NormalizedStatus | "all")[], autoCreatedOnly: false },
+  { name: "Interviews Active", statuses: ["interviewing"] as (NormalizedStatus | "all")[], autoCreatedOnly: false },
+  { name: "Awaiting Response", statuses: ["applied", "under_review"] as (NormalizedStatus | "all")[], autoCreatedOnly: false },
+  { name: "Action Required", statuses: ["assessment", "pending"] as (NormalizedStatus | "all")[], autoCreatedOnly: false },
+  { name: "Rejected / Closed", statuses: ["rejected", "withdrawn"] as (NormalizedStatus | "all")[], autoCreatedOnly: false },
+  { name: "Auto-Created", statuses: ["all"] as (NormalizedStatus | "all")[], autoCreatedOnly: true },
 ];
+
+export const isAutoCreatedApplication = (app: ApplicationViewItem) => {
+  const company = (app.company || "").toLowerCase();
+  const title = (app.title || "").toLowerCase();
+  const source = (app.source || "").toLowerCase();
+  return (
+    company.includes("unknown") ||
+    title.includes("unknown") ||
+    source.includes("email") ||
+    source.includes("auto")
+  );
+};
 
 export function ApplicationsTable({ initialApplications }: ApplicationsTableProps) {
   const router = useRouter();
@@ -62,6 +76,7 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
   const [remoteFilter, setRemoteFilter] = useState("all");
   const [recruiterContactedOnly, setRecruiterContactedOnly] = useState(false);
   const [followUpOnly, setFollowUpOnly] = useState(false);
+  const [autoCreatedOnly, setAutoCreatedOnly] = useState(false);
 
   // Sorting
   const [sortField, setSortField] = useState<keyof ApplicationViewItem>("appliedDate");
@@ -130,6 +145,7 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
     setRemoteFilter("all");
     setRecruiterContactedOnly(false);
     setFollowUpOnly(false);
+    setAutoCreatedOnly(false);
     setCurrentPage(1);
     router.push("/applications");
   };
@@ -142,6 +158,11 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
         if (!selectedStatuses.includes(app.normalizedStatus)) {
           return false;
         }
+      }
+
+      // Auto-created / Needs details filter
+      if (autoCreatedOnly && !isAutoCreatedApplication(app)) {
+        return false;
       }
 
       // Search query (company, title, notes, id)
@@ -185,7 +206,12 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
     remoteFilter,
     recruiterContactedOnly,
     followUpOnly,
+    autoCreatedOnly,
   ]);
+
+  const autoCreatedCount = useMemo(() => {
+    return initialApplications.filter(isAutoCreatedApplication).length;
+  }, [initialApplications]);
 
   // Sorted applications
   const sortedApplications = useMemo(() => {
@@ -259,7 +285,8 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
     roleCategoryFilter !== "all" ||
     remoteFilter !== "all" ||
     recruiterContactedOnly ||
-    followUpOnly;
+    followUpOnly ||
+    autoCreatedOnly;
 
   return (
     <div className="space-y-5">
@@ -272,12 +299,14 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
         {SAVED_VIEWS.map((view) => {
           const isSelected =
             view.statuses.length === selectedStatuses.length &&
-            view.statuses.every((s) => selectedStatuses.includes(s));
+            view.statuses.every((s) => selectedStatuses.includes(s)) &&
+            Boolean(view.autoCreatedOnly) === autoCreatedOnly;
           return (
             <button
               key={view.name}
               onClick={() => {
                 setSelectedStatuses(view.statuses);
+                setAutoCreatedOnly(Boolean(view.autoCreatedOnly));
                 setCurrentPage(1);
               }}
               className={`px-3 py-1 rounded-full font-medium transition-colors shrink-0 border ${
@@ -375,6 +404,19 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
             <span>Action Required</span>
           </Button>
 
+          <Button
+            variant={autoCreatedOnly ? "default" : "outline"}
+            size="sm"
+            onClick={() => {
+              setAutoCreatedOnly(!autoCreatedOnly);
+              setCurrentPage(1);
+            }}
+            className="h-9 text-xs gap-1.5"
+          >
+            <Sparkles className="h-3.5 w-3.5 text-amber-500" />
+            <span>Auto-Created {autoCreatedCount > 0 ? `(${autoCreatedCount})` : ""}</span>
+          </Button>
+
           {/* Clear Filters */}
           {hasActiveFilters && (
             <Button
@@ -406,6 +448,14 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
       {hasActiveFilters && (
         <div className="flex items-center gap-2 flex-wrap text-xs text-muted-foreground pt-1">
           <span className="font-semibold text-foreground">Active Filters:</span>
+          {autoCreatedOnly && (
+            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/20 font-medium">
+              Filter: Auto-Created / Unknown
+              <button onClick={() => setAutoCreatedOnly(false)}>
+                <X className="h-3 w-3" />
+              </button>
+            </span>
+          )}
           {!selectedStatuses.includes("all") &&
             selectedStatuses.map((s) => (
               <span
@@ -508,15 +558,28 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
                 >
                   <td className="py-3.5 px-4">
                     <div className="space-y-0.5">
-                      <div className="font-semibold text-foreground flex items-center gap-2 group-hover:text-primary transition-colors">
+                      <div className="font-semibold text-foreground flex items-center gap-2 group-hover:text-primary transition-colors flex-wrap">
                         <span>{app.company}</span>
                         <span className="text-[10px] font-mono text-muted-foreground">#{app.id}</span>
+                        {isAutoCreatedApplication(app) && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 inline-flex items-center gap-1">
+                            <Sparkles className="h-2.5 w-2.5" />
+                            Auto-Created
+                          </span>
+                        )}
                       </div>
                       <div className="text-muted-foreground truncate max-w-sm">{app.title}</div>
                     </div>
                   </td>
                   <td className="py-3.5 px-4">
-                    <StatusBadge status={app.normalizedStatus} />
+                    <div className="space-y-0.5">
+                      <StatusBadge status={app.normalizedStatus} />
+                      {isAutoCreatedApplication(app) && app.rawStatus && (
+                        <span className="text-[10px] text-muted-foreground block font-mono">
+                          Auto: {app.rawStatus}
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td className="py-3.5 px-4">
                     {app.score ? (
@@ -598,10 +661,25 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
             >
               <div className="flex items-start justify-between gap-2">
                 <div>
-                  <h4 className="font-bold text-sm text-foreground">{app.company}</h4>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <h4 className="font-bold text-sm text-foreground">{app.company}</h4>
+                    {isAutoCreatedApplication(app) && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 inline-flex items-center gap-0.5">
+                        <Sparkles className="h-2.5 w-2.5" />
+                        Auto-Created
+                      </span>
+                    )}
+                  </div>
                   <p className="text-xs text-muted-foreground">{app.title}</p>
                 </div>
-                <StatusBadge status={app.normalizedStatus} size="sm" />
+                <div className="text-right space-y-0.5 shrink-0">
+                  <StatusBadge status={app.normalizedStatus} size="sm" />
+                  {isAutoCreatedApplication(app) && app.rawStatus && (
+                    <span className="text-[9px] text-muted-foreground block font-mono">
+                      Auto: {app.rawStatus}
+                    </span>
+                  )}
+                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-2 text-xs text-muted-foreground pt-1 border-t">

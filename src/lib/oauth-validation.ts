@@ -225,7 +225,7 @@ export function validateOAuthClient(
     if (trimmedRedirect !== VERIFIED_CURSOR_CALLBACK_URI) {
       return {
         trusted: false,
-        reason: `Unauthorized callback URI '${trimmedRedirect}'. Cursor must use the verified HTTPS callback (${VERIFIED_CURSOR_CALLBACK_URI}).`,
+        reason: `Mismatched client metadata. Unauthorized callback URI '${trimmedRedirect}'. Cursor must use the verified HTTPS callback (${VERIFIED_CURSOR_CALLBACK_URI}).`,
         connector: "cursor",
         clientId: client.id,
         redirectUri: trimmedRedirect,

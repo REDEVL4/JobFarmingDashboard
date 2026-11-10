@@ -15,6 +15,7 @@ import {
   AlertCircle,
   Briefcase,
   CheckCircle2,
+  Sparkles,
 } from "lucide-react";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
@@ -98,6 +99,22 @@ export function ApplicationDrawer({ application, onClose }: ApplicationDrawerPro
 
           {/* Drawer Body */}
           <div className="p-6 space-y-6 flex-1">
+            {/* Auto-Created Notice Banner */}
+            {(application.company.toLowerCase().includes("unknown") ||
+              application.title.toLowerCase().includes("unknown") ||
+              application.source.toLowerCase().includes("auto") ||
+              application.source.toLowerCase().includes("email")) && (
+              <div className="p-3.5 rounded-xl border border-amber-500/30 bg-amber-500/10 text-xs text-amber-800 dark:text-amber-300 space-y-1">
+                <div className="flex items-center gap-1.5 font-bold">
+                  <Sparkles className="h-4 w-4 text-amber-500 shrink-0" />
+                  <span>Auto-Created from Recruitment Email</span>
+                </div>
+                <p className="leading-relaxed">
+                  This opportunity was automatically created because an incoming recruitment email did not match existing applications. The current stage ({application.rawStatus || application.normalizedStatus}) was auto-applied by the 10-minute auto-approval pipeline. You can update company, title, or notes as needed.
+                </p>
+              </div>
+            )}
+
             {/* Quick Metadata Bar */}
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 p-3.5 rounded-xl border bg-muted/30 text-xs">
               <div>
