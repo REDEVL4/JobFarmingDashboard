@@ -1,11 +1,11 @@
-const methods = new Set(['initialize', 'notifications/initialized', 'tools/list']);
+const methods = new Set(['initialize', 'notifications/initialized', 'tools/list', 'tools/call']);
 const categories = [
   [/protocol version/i, 'protocol_version'],
   [/session/i, 'session'],
   [/_meta|envelope/i, 'envelope'],
   [/content.type/i, 'content_type'],
   [/accept.*header/i, 'accept'],
-  [/parse error|invalid json/i, 'parse'],
+  [/parse error|invalid json|not a valid json-rpc/i, 'parse'],
   [/invalid request|invalid parameters|invalid params/i, 'invalid_request'],
 ];
 
@@ -23,6 +23,7 @@ export async function recordTransportError(headers, message, response) {
     status: response.status,
     rpc_code: Number.isSafeInteger(error?.code) ? error.code : null,
     reason,
+    error_message: typeof error?.message === 'string' ? error.message.slice(0, 100) : null,
     protocol_header_present: headers.has('MCP-Protocol-Version'),
     session_header_present: headers.has('MCP-Session-Id'),
     accept: acceptsJson && acceptsEvents ? 'json_and_sse' : acceptsJson ? 'json' : acceptsEvents ? 'sse' : 'other',

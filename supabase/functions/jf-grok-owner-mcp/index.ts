@@ -8,7 +8,7 @@ import { recordTransportError } from './transport-diagnostic.mjs';
 import { recordToolList } from './discovery.mjs';
 import { fetchAndSanitizeQueuedEmail } from './gmail-fetcher.ts';
 
-const DIAGNOSTIC_UNTIL = Date.parse('2026-11-08T22:57:09.877Z');
+const DIAGNOSTIC_UNTIL = Date.parse('2026-11-13T00:00:00.000Z');
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -72,8 +72,9 @@ const handler = pipeline(
       }
     }
 
-    const mcp = createMcpHandler(() => {
-      const server = new McpServer({ name: 'jf-grok-owner-mcp', version: '0.3.0' });
+    const mcp = createMcpHandler(
+      () => {
+        const server = new McpServer({ name: 'jf-grok-owner-mcp', version: '0.3.0' });
 
       // Tool 1: Runtime Status (read-only)
       server.registerTool(
@@ -210,9 +211,19 @@ const handler = pipeline(
       );
 
       return server;
+    },
+    {
+      onerror: (error: any) => {
+        console.warn('jf_owner_mcp_error ' + JSON.stringify({
+          message: error?.message,
+          name: error?.name,
+        }));
+      },
     });
 
-    const response = await mcp.fetch(req);
+    const response = await mcp.fetch(req, {
+      parsedBody: req.method === 'POST' ? message : undefined,
+    });
     if (Date.now() < DIAGNOSTIC_UNTIL && req.method === 'POST' && response.status === 400) {
       try {
         EdgeRuntime.waitUntil(recordTransportError(req.headers, message, response.clone()).catch(() => {}));
