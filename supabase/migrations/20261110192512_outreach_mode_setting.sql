@@ -34,3 +34,4 @@ end;
 $$;
 
 grant execute on function jobbot.set_outreach_mode(text) to authenticated;
+

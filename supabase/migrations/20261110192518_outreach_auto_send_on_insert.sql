@@ -66,3 +66,4 @@ create trigger outreach_auto_send_on_insert
 before insert on jobbot.outreach_proposals
 for each row
 execute function jobbot.outreach_auto_send_on_insert();
+
