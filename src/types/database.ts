@@ -159,6 +159,45 @@ export interface DbOutreachContact {
   updated_at: string;
 }
 
+export interface DbOutreachProposal {
+  id: string;
+  owner_id?: string;
+  contact_id?: string | null;
+  inbound_event_id?: string | null;
+  action_type:
+    | "connection_request"
+    | "message"
+    | "follow_up"
+    | "comment"
+    | "reply"
+    | "resume_share"
+    | "handoff_to_job_bot"
+    | string;
+  channel: "gmail" | "linkedin" | string;
+  target_name?: string | null;
+  target_title?: string | null;
+  target_company?: string | null;
+  linkedin_url?: string | null;
+  email?: string | null;
+  signal?: string | null;
+  proposed_text: string;
+  approved_text?: string | null;
+  state:
+    | "pending_approval"
+    | "approved"
+    | "rejected"
+    | "queued"
+    | "sent"
+    | "draft_ready"
+    | "failed"
+    | string;
+  approved_at?: string | null;
+  sent_at?: string | null;
+  error?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface DbSyncLogVerificationResults {
   status?: string;
   mailbox?: string;

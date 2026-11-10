@@ -5,6 +5,7 @@ import type {
   DashboardMetrics,
   GmailMonitoringStats,
   OutreachStats,
+  OutreachProposal,
   DataResult,
 } from "@/types/dashboard";
 import type {
@@ -645,6 +646,174 @@ export async function fetchOutreachStats(): Promise<DataResult<OutreachStats>> {
       status: "connection_error",
       error: err?.message || "Failed to load outreach contacts",
     };
+  }
+}
+
+/**
+ * Fetches real outreach proposals from `jobbot.outreach_proposals`.
+ * Query jobbot.outreach_proposals where state in ('pending_approval', 'draft_ready', 'queued', 'sent'), order by created_at desc.
+ * Uses the same Supabase client and error handling pattern as fetchOutreachStats.
+ */
+export async function fetchOutreachProposals(): Promise<DataResult<OutreachProposal[]>> {
+  try {
+    const auth = await getAuthenticatedOwner();
+
+    if (!auth.success) {
+      return {
+        data: [],
+        status: auth.reason === "unauthenticated" ? "unauthenticated" : "permission_denied",
+        error: auth.error,
+      };
+    }
+
+    // Query outreach_proposals via public view jf_outreach_proposals or outreach_proposals
+    let { data, error } = await auth.client
+      .from("jf_outreach_proposals")
+      .select("*")
+      .in("state", ["pending_approval", "draft_ready", "queued", "sent"])
+      .order("created_at", { ascending: false });
+
+    if (error && error.code === "42P01") {
+      const fallback = await auth.client
+        .from("outreach_proposals")
+        .select("*")
+        .in("state", ["pending_approval", "draft_ready", "queued", "sent"])
+        .order("created_at", { ascending: false });
+      data = fallback.data;
+      error = fallback.error;
+    }
+
+    if (error) {
+      console.error("Supabase query error for outreach_proposals:", error.message);
+      const isPermission =
+        error.code === "42501" ||
+        error.message.toLowerCase().includes("permission") ||
+        error.message.toLowerCase().includes("policy") ||
+        error.message.toLowerCase().includes("rls");
+
+      return {
+        data: [],
+        status: isPermission ? "permission_denied" : "connection_error",
+        error: `Database query failed: ${error.message}`,
+      };
+    }
+
+    if (!data || data.length === 0) {
+      return {
+        data: [],
+        status: "empty",
+        error: null,
+      };
+    }
+
+    return {
+      data: data as OutreachProposal[],
+      status: "success",
+      error: null,
+    };
+  } catch (err: any) {
+    console.error("fetchOutreachProposals exception:", err?.message || err);
+    return {
+      data: [],
+      status: "connection_error",
+      error: `Service connection error: ${err?.message || "Failed to load outreach proposals"}`,
+    };
+  }
+}
+
+/**
+ * Resolves an outreach proposal by approving or rejecting it.
+ * Updates the row in jobbot.outreach_proposals via Supabase.
+ */
+export async function resolveOutreachProposal(
+  proposalId: string,
+  action: "approve" | "reject",
+  approvedText?: string
+): Promise<{ success: boolean; data?: OutreachProposal; error?: string }> {
+  try {
+    const auth = await getAuthenticatedOwner();
+    if (!auth.success) {
+      return { success: false, error: auth.error };
+    }
+
+    // 1. Fetch current proposal to determine channel and action_type
+    let fetchRes = await auth.client
+      .from("jf_outreach_proposals")
+      .select("*")
+      .eq("id", proposalId)
+      .maybeSingle();
+
+    if (fetchRes.error && fetchRes.error.code === "42P01") {
+      fetchRes = await auth.client
+        .from("outreach_proposals")
+        .select("*")
+        .eq("id", proposalId)
+        .maybeSingle();
+    }
+
+    if (fetchRes.error || !fetchRes.data) {
+      return {
+        success: false,
+        error: fetchRes.error?.message || "Proposal not found.",
+      };
+    }
+
+    const current = fetchRes.data as OutreachProposal;
+    const now = new Date().toISOString();
+    let updates: Partial<OutreachProposal>;
+
+    if (action === "approve") {
+      const channel = (current.channel || "").toLowerCase();
+      const actionType = (current.action_type || "").toLowerCase();
+
+      let targetState = "draft_ready";
+      if (channel === "gmail") {
+        targetState = "queued";
+      } else if (channel === "linkedin" || actionType === "handoff_to_job_bot") {
+        targetState = "draft_ready";
+      }
+
+      updates = {
+        approved_text: approvedText !== undefined ? approvedText : current.proposed_text,
+        approved_at: now,
+        state: targetState,
+        updated_at: now,
+      };
+    } else {
+      updates = {
+        state: "rejected",
+        updated_at: now,
+      };
+    }
+
+    let updateRes = await auth.client
+      .from("jf_outreach_proposals")
+      .update(updates)
+      .eq("id", proposalId)
+      .select()
+      .maybeSingle();
+
+    if (updateRes.error && updateRes.error.code === "42P01") {
+      updateRes = await auth.client
+        .from("outreach_proposals")
+        .update(updates)
+        .eq("id", proposalId)
+        .select()
+        .maybeSingle();
+    }
+
+    if (updateRes.error) {
+      console.error("[resolveOutreachProposal] Update error:", updateRes.error);
+      return { success: false, error: updateRes.error.message };
+    }
+
+    return {
+      success: true,
+      data: updateRes.data as OutreachProposal,
+    };
+  } catch (err: any) {
+    console.error("[resolveOutreachProposal] Exception:", err);
+    return { success: false, error: err?.message || "Failed to update outreach proposal" };
   }
 }
 

@@ -1,4 +1,6 @@
-import type { DbApplication, DbJob, DbEmailEvent, DbOutreachContact } from "./database";
+import type { DbApplication, DbJob, DbEmailEvent, DbOutreachContact, DbOutreachProposal } from "./database";
+
+export type OutreachProposal = DbOutreachProposal;
 
 export type NormalizedStatus =
   | "all"

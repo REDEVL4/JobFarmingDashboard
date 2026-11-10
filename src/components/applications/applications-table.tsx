@@ -45,13 +45,27 @@ const STATUS_TABS: { label: string; value: NormalizedStatus | "all" }[] = [
 ];
 
 const SAVED_VIEWS = [
-  { name: "Default View", statuses: ["all"] as (NormalizedStatus | "all")[], autoCreatedOnly: false },
-  { name: "Interviews Active", statuses: ["interviewing"] as (NormalizedStatus | "all")[], autoCreatedOnly: false },
-  { name: "Awaiting Response", statuses: ["applied", "under_review"] as (NormalizedStatus | "all")[], autoCreatedOnly: false },
-  { name: "Action Required", statuses: ["assessment", "pending"] as (NormalizedStatus | "all")[], autoCreatedOnly: false },
-  { name: "Rejected / Closed", statuses: ["rejected", "withdrawn"] as (NormalizedStatus | "all")[], autoCreatedOnly: false },
-  { name: "Auto-Created", statuses: ["all"] as (NormalizedStatus | "all")[], autoCreatedOnly: true },
+  { name: "Default View", statuses: ["all"] as (NormalizedStatus | "all")[], autoCreatedOnly: false, todayOnly: false },
+  { name: "Today's Jobs", statuses: ["all"] as (NormalizedStatus | "all")[], autoCreatedOnly: false, todayOnly: true },
+  { name: "Interviews Active", statuses: ["interviewing"] as (NormalizedStatus | "all")[], autoCreatedOnly: false, todayOnly: false },
+  { name: "Awaiting Response", statuses: ["applied", "under_review"] as (NormalizedStatus | "all")[], autoCreatedOnly: false, todayOnly: false },
+  { name: "Action Required", statuses: ["assessment", "pending"] as (NormalizedStatus | "all")[], autoCreatedOnly: false, todayOnly: false },
+  { name: "Rejected / Closed", statuses: ["rejected", "withdrawn"] as (NormalizedStatus | "all")[], autoCreatedOnly: false, todayOnly: false },
+  { name: "Auto-Created", statuses: ["all"] as (NormalizedStatus | "all")[], autoCreatedOnly: true, todayOnly: false },
 ];
+
+export const isApplicationFromToday = (app: ApplicationViewItem) => {
+  if (!app.appliedDate) return false;
+  const applied = new Date(app.appliedDate);
+  if (isNaN(applied.getTime())) return false;
+  const now = new Date();
+  const isSameDay =
+    applied.getFullYear() === now.getFullYear() &&
+    applied.getMonth() === now.getMonth() &&
+    applied.getDate() === now.getDate();
+  const utcMatch = app.appliedDate.slice(0, 10) === now.toISOString().slice(0, 10);
+  return isSameDay || utcMatch;
+};
 
 export const isAutoCreatedApplication = (app: ApplicationViewItem) => {
   const company = (app.company || "").toLowerCase();
@@ -77,6 +91,7 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
   const [recruiterContactedOnly, setRecruiterContactedOnly] = useState(false);
   const [followUpOnly, setFollowUpOnly] = useState(false);
   const [autoCreatedOnly, setAutoCreatedOnly] = useState(false);
+  const [todayOnly, setTodayOnly] = useState(false);
 
   // Sorting
   const [sortField, setSortField] = useState<keyof ApplicationViewItem>("appliedDate");
@@ -146,6 +161,7 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
     setRecruiterContactedOnly(false);
     setFollowUpOnly(false);
     setAutoCreatedOnly(false);
+    setTodayOnly(false);
     setCurrentPage(1);
     router.push("/applications");
   };
@@ -158,6 +174,11 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
         if (!selectedStatuses.includes(app.normalizedStatus)) {
           return false;
         }
+      }
+
+      // Today's jobs filter
+      if (todayOnly && !isApplicationFromToday(app)) {
+        return false;
       }
 
       // Auto-created / Needs details filter
@@ -207,10 +228,15 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
     recruiterContactedOnly,
     followUpOnly,
     autoCreatedOnly,
+    todayOnly,
   ]);
 
   const autoCreatedCount = useMemo(() => {
     return initialApplications.filter(isAutoCreatedApplication).length;
+  }, [initialApplications]);
+
+  const todayCount = useMemo(() => {
+    return initialApplications.filter(isApplicationFromToday).length;
   }, [initialApplications]);
 
   // Sorted applications
@@ -286,7 +312,8 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
     remoteFilter !== "all" ||
     recruiterContactedOnly ||
     followUpOnly ||
-    autoCreatedOnly;
+    autoCreatedOnly ||
+    todayOnly;
 
   return (
     <div className="space-y-5">
@@ -300,13 +327,15 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
           const isSelected =
             view.statuses.length === selectedStatuses.length &&
             view.statuses.every((s) => selectedStatuses.includes(s)) &&
-            Boolean(view.autoCreatedOnly) === autoCreatedOnly;
+            Boolean(view.autoCreatedOnly) === autoCreatedOnly &&
+            Boolean(view.todayOnly) === todayOnly;
           return (
             <button
               key={view.name}
               onClick={() => {
                 setSelectedStatuses(view.statuses);
                 setAutoCreatedOnly(Boolean(view.autoCreatedOnly));
+                setTodayOnly(Boolean(view.todayOnly));
                 setCurrentPage(1);
               }}
               className={`px-3 py-1 rounded-full font-medium transition-colors shrink-0 border ${
@@ -417,6 +446,19 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
             <span>Auto-Created {autoCreatedCount > 0 ? `(${autoCreatedCount})` : ""}</span>
           </Button>
 
+          <Button
+            variant={todayOnly ? "default" : "outline"}
+            size="sm"
+            onClick={() => {
+              setTodayOnly(!todayOnly);
+              setCurrentPage(1);
+            }}
+            className="h-9 text-xs gap-1.5"
+          >
+            <Calendar className="h-3.5 w-3.5 text-blue-500" />
+            <span>Today&apos;s Jobs {todayCount > 0 ? `(${todayCount})` : ""}</span>
+          </Button>
+
           {/* Clear Filters */}
           {hasActiveFilters && (
             <Button
@@ -448,6 +490,14 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
       {hasActiveFilters && (
         <div className="flex items-center gap-2 flex-wrap text-xs text-muted-foreground pt-1">
           <span className="font-semibold text-foreground">Active Filters:</span>
+          {todayOnly && (
+            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-blue-500/10 text-blue-700 dark:text-blue-300 border border-blue-500/20 font-medium">
+              Filter: Today&apos;s Jobs
+              <button onClick={() => setTodayOnly(false)}>
+                <X className="h-3 w-3" />
+              </button>
+            </span>
+          )}
           {autoCreatedOnly && (
             <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/20 font-medium">
               Filter: Auto-Created / Unknown
