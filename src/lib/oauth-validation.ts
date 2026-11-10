@@ -7,7 +7,9 @@ export const VERIFIED_GROK_CALLBACK_URI = "https://grok.com/connectors-oauth-exc
 // Verified Cursor MCP connector callback URI (HTTPS only; cleartext loopback disallowed)
 export const VERIFIED_CURSOR_CALLBACK_URI = "https://www.cursor.com/agents/mcp/oauth/callback";
 
-// Specifically approved Cursor Desktop OAuth Client ID
+// Historical Cursor client ID, retained only to identify known legacy registrations.
+// Newly registered Cursor clients receive new UUIDs and must pass the same callback
+// and interactive consent gates; this value is NOT an authorization allowlist.
 export const VERIFIED_CURSOR_CLIENT_ID = "cad36a3f-674b-464f-a90f-8ab9b661218d";
 
 // Active approved redirect URIs
@@ -158,8 +160,10 @@ export type ClientTrustResult =
 
 /**
  * Verified OAuth Client verification:
- * Supports dynamically registered Grok clients and the specific approved Cursor Desktop client,
- * while preventing arbitrary client registrations and insecure loopback callbacks.
+ * Supports dynamically registered Grok and Cursor clients.
+ * Call only with client details returned by Supabase OAuth getAuthorizationDetails,
+ * which binds the requested callback to a registered OAuth client. An eligible
+ * registration still requires owner approval; the MCP also checks active consent.
  *
  * Requirements:
  * 1. Valid UUID client identifier.
@@ -204,23 +208,15 @@ export function validateOAuthClient(
     };
   }
 
-  // Check if caller is requesting as Cursor Desktop MCP client
-  if (trimmedRedirect === VERIFIED_CURSOR_CALLBACK_URI || client.id === VERIFIED_CURSOR_CLIENT_ID) {
-    if (!/^Cursor/i.test(clientName)) {
+  // Cursor may dynamically register a fresh UUID on each connection attempt.
+  // Accept only server-reported exact Cursor metadata with the exact HTTPS callback.
+  // Do not treat the historical Cursor client UUID as a permanent allowlist.
+  if (trimmedRedirect === VERIFIED_CURSOR_CALLBACK_URI || clientName === "Cursor" || client.id === VERIFIED_CURSOR_CLIENT_ID) {
+    if (clientName !== "Cursor") {
       return {
         trusted: false,
         reason: `Unauthorized callback URI '${trimmedRedirect}'. Non-Cursor clients may not use the Cursor callback URI.`,
         connector: "untrusted",
-        clientId: client.id,
-        redirectUri: trimmedRedirect,
-      };
-    }
-
-    if (client.id !== VERIFIED_CURSOR_CLIENT_ID) {
-      return {
-        trusted: false,
-        reason: `Unauthorized Cursor client ID '${client.id}'. Only the approved Cursor client (${VERIFIED_CURSOR_CLIENT_ID}) is authorized.`,
-        connector: "cursor",
         clientId: client.id,
         redirectUri: trimmedRedirect,
       };
@@ -239,8 +235,8 @@ export function validateOAuthClient(
     return {
       trusted: true,
       connector: "cursor",
-      isKnownStatic: true,
-      isDynamicRegistration: false,
+      isKnownStatic: client.id === VERIFIED_CURSOR_CLIENT_ID,
+      isDynamicRegistration: client.id !== VERIFIED_CURSOR_CLIENT_ID,
       clientName: "Cursor",
       clientId: client.id,
       redirectUri: trimmedRedirect,
