@@ -216,16 +216,6 @@ export function validateOAuthClient(
       };
     }
 
-    if (client.id !== VERIFIED_CURSOR_CLIENT_ID) {
-      return {
-        trusted: false,
-        reason: `Unauthorized Cursor client ID '${client.id}'. Only the approved Cursor client (${VERIFIED_CURSOR_CLIENT_ID}) is authorized.`,
-        connector: "cursor",
-        clientId: client.id,
-        redirectUri: trimmedRedirect,
-      };
-    }
-
     if (trimmedRedirect !== VERIFIED_CURSOR_CALLBACK_URI) {
       return {
         trusted: false,
@@ -236,12 +226,14 @@ export function validateOAuthClient(
       };
     }
 
+    const isKnownStatic = client.id === VERIFIED_CURSOR_CLIENT_ID;
+
     return {
       trusted: true,
       connector: "cursor",
-      isKnownStatic: true,
-      isDynamicRegistration: false,
-      clientName: "Cursor",
+      isKnownStatic,
+      isDynamicRegistration: !isKnownStatic,
+      clientName: client.name || "Cursor",
       clientId: client.id,
       redirectUri: trimmedRedirect,
       requiresInteractiveConsent: true,

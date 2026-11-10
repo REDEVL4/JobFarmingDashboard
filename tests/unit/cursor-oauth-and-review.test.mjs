@@ -51,14 +51,17 @@ test("Cursor OAuth: rejects cleartext loopback http://127.0.0.1:8787/callback", 
   assert.match(res.reason, /Insecure loopback redirect URI/i);
 });
 
-test("Cursor OAuth: rejects arbitrary/unapproved client ID attempting to use Cursor callback", () => {
-  const arbitraryClient = {
-    id: "99999999-9999-9999-9999-999999999999",
+test("Cursor OAuth: authorizes dynamically registered Cursor client ID with HTTPS callback", () => {
+  const dynamicClient = {
+    id: "24c4a738-2e39-4298-a579-e1024a1b2686",
     name: "Cursor",
   };
-  const res = validateOAuthClient(arbitraryClient, VERIFIED_CURSOR_CALLBACK_URI);
-  assert.equal(res.trusted, false);
-  assert.match(res.reason, /Unauthorized Cursor client ID/i);
+  const res = validateOAuthClient(dynamicClient, VERIFIED_CURSOR_CALLBACK_URI);
+  assert.equal(res.trusted, true);
+  assert.equal(res.connector, "cursor");
+  assert.equal(res.isDynamicRegistration, true);
+  assert.equal(res.requiresInteractiveConsent, true);
+  assert.equal(res.clientId, "24c4a738-2e39-4298-a579-e1024a1b2686");
 });
 
 test("Cursor OAuth: rejects non-Cursor client name attempting to use Cursor callback", () => {
