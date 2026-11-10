@@ -152,13 +152,14 @@ export type ClientTrustResult =
     };
 
 /**
- * Permanent Grok OAuth Client verification:
- * Supports dynamically registered Grok clients while preventing arbitrary client registrations.
+ * OAuth client verification:
+ * Preserves dynamically registered Grok clients and allows one specifically
+ * reviewed Cursor registration. Arbitrary Cursor registrations remain denied.
  *
  * Requirements:
  * 1. Valid UUID client identifier.
- * 2. Exact approved Grok callback URI (https://grok.com/connectors-oauth-exchange-code/).
- * 3. Verified client metadata matching Grok connector name.
+ * 2. Exact approved callback URI for that client.
+ * 3. Grok metadata requirements or exact approved Cursor ID and name.
  * 4. Requires explicit interactive owner consent before authorization code is issued.
  */
 export function validateOAuthClient(
@@ -248,7 +249,7 @@ export function validateOAuthClient(
 
 /**
  * Validates automatic redirect URLs from previously approved OAuth grants:
- * Ensures the destination exactly matches the approved Grok callback URI.
+ * Ensures destination is an exact allowlisted Grok or Cursor callback URI.
  */
 export function validateAutoRedirectUrl(redirectUrl: string | null | undefined): {
   valid: boolean;
@@ -265,10 +266,10 @@ export function validateAutoRedirectUrl(redirectUrl: string | null | undefined):
   try {
     const parsed = new URL(redirectUrl.trim());
     const originPath = `${parsed.origin}${parsed.pathname}`;
-    if (originPath !== VERIFIED_GROK_CALLBACK_URI) {
+    if (!TRUSTED_REDIRECT_URIS.includes(originPath)) {
       return {
         valid: false,
-        error: `Unauthorized auto-redirect destination '${originPath}'. Only the verified Grok connector callback (${VERIFIED_GROK_CALLBACK_URI}) is permitted.`,
+        error: `Unauthorized auto-redirect destination '${originPath}'. The redirect must match a verified connector callback.`,
         targetOriginPath: originPath,
       };
     }
