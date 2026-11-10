@@ -337,8 +337,11 @@ test("Defect 1: Server-role-only credential accessor rejects users and OAuth tok
 
   // 5. Verify gmail-fetcher calls public.jf_get_gmail_fetch_credentials
   const fetcherCode = fs.readFileSync("supabase/functions/jf-grok-owner-mcp/gmail-fetcher.ts", "utf8");
-  assert.ok(fetcherCode.includes('rpc("jf_get_gmail_fetch_credentials")'), "gmail-fetcher calls jf_get_gmail_fetch_credentials");
-  assert.ok(!fetcherCode.includes('rpc("get_gmail_fetch_credentials")'), "Obsolete get_gmail_fetch_credentials call removed");
+  assert.ok(
+    fetcherCode.includes('rpc/jf_get_gmail_fetch_credentials') || fetcherCode.includes('rpc("jf_get_gmail_fetch_credentials")'),
+    "gmail-fetcher calls jf_get_gmail_fetch_credentials"
+  );
+  assert.ok(!fetcherCode.includes('get_gmail_fetch_credentials"'), "Obsolete get_gmail_fetch_credentials call removed");
 });
 
 test("Defect 2: Prevents repeated email classification & protects open proposals", () => {
