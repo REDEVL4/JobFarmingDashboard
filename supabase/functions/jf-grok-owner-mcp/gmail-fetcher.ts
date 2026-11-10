@@ -87,7 +87,7 @@ export async function fetchAndSanitizeQueuedEmail(
 ): Promise<SanitizedEmailResult> {
   // 1. Retrieve credentials via service_role admin client (not user-scoped client)
   const adminClient = getAdminClient();
-  const { data: creds, error: credsError } = await adminClient.rpc("get_gmail_fetch_credentials");
+  const { data: creds, error: credsError } = await adminClient.rpc("jf_get_gmail_fetch_credentials");
   if (credsError || !creds?.client_id || !creds?.client_secret || !creds?.refresh_token) {
     throw new Error("Gmail OAuth credentials unavailable in Vault");
   }

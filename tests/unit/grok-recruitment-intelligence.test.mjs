@@ -296,10 +296,242 @@ test("Grok Intelligence Migration File Audit: Schema Compatibility & Security Re
   assert.ok(!sql21.includes("UPDATE public.job_applications"), "Zero writes to job_applications");
 
   const sql23 = fs.readFileSync("supabase/migrations/20261109230000_permanent_grok_dynamic_oauth.sql", "utf8");
-  assert.ok(sql23.includes("REVOKE ALL ON FUNCTION jobbot.get_gmail_fetch_credentials() FROM PUBLIC, anon, authenticated;"), "Remediates Gmail credential accessor execution privilege");
-  assert.ok(sql23.includes("GRANT EXECUTE ON FUNCTION jobbot.get_gmail_fetch_credentials() TO service_role;"), "Restricts credential accessor to service_role only");
+  assert.ok(sql23.includes("REVOKE ALL ON FUNCTION public.jf_get_gmail_fetch_credentials() FROM PUBLIC, anon, authenticated;"), "Remediates Gmail credential accessor execution privilege in public");
+  assert.ok(sql23.includes("GRANT EXECUTE ON FUNCTION public.jf_get_gmail_fetch_credentials() TO service_role;"), "Restricts credential accessor to service_role only");
+  assert.ok(sql23.includes("CREATE OR REPLACE FUNCTION public.jf_get_gmail_fetch_credentials()"), "Defines public.jf_get_gmail_fetch_credentials");
+  assert.ok(sql23.includes("CREATE OR REPLACE FUNCTION public.jf_grok_list_pending_emails("), "Defines keyset-paginated jf_grok_list_pending_emails");
+  assert.ok(sql23.includes("CREATE OR REPLACE FUNCTION public.jf_grok_submit_classification_proposal("), "Defines atomic jf_grok_submit_classification_proposal");
   assert.ok(sql23.includes("CREATE OR REPLACE FUNCTION jobbot.require_grok_intelligence_auth()"), "Secures require_grok_intelligence_auth");
   assert.ok(sql23.includes("jobbot.validate_grok_oauth_client(v_client_id::uuid, v_uid)"), "Delegates to single source of truth validator");
 });
+
+test("Defect 1: Server-role-only credential accessor rejects users and OAuth tokens", () => {
+  function evaluateCredentialAccess(jwtClaims) {
+    const role = jwtClaims?.role;
+    const clientId = jwtClaims?.client_id;
+    if (role !== "service_role" || clientId != null) {
+      return { allowed: false, error: "Access denied: service_role authorization required" };
+    }
+    return { allowed: true };
+  }
+
+  // 1. service_role without client_id is permitted
+  assert.deepEqual(evaluateCredentialAccess({ role: "service_role" }), { allowed: true });
+
+  // 2. authenticated user (even owner) is denied
+  const ownerSession = evaluateCredentialAccess({ sub: DESIGNATED_OWNER_UUID, role: "authenticated" });
+  assert.equal(ownerSession.allowed, false);
+  assert.equal(ownerSession.error, "Access denied: service_role authorization required");
+
+  // 3. Grok OAuth token (authenticated + client_id) is denied
+  const grokToken = evaluateCredentialAccess({
+    sub: DESIGNATED_OWNER_UUID,
+    role: "authenticated",
+    client_id: ACTIVE_GROK_CLIENT_ID,
+  });
+  assert.equal(grokToken.allowed, false);
+  assert.equal(grokToken.error, "Access denied: service_role authorization required");
+
+  // 4. anon role is denied
+  assert.equal(evaluateCredentialAccess({ role: "anon" }).allowed, false);
+
+  // 5. Verify gmail-fetcher calls public.jf_get_gmail_fetch_credentials
+  const fetcherCode = fs.readFileSync("supabase/functions/jf-grok-owner-mcp/gmail-fetcher.ts", "utf8");
+  assert.ok(fetcherCode.includes('rpc("jf_get_gmail_fetch_credentials")'), "gmail-fetcher calls jf_get_gmail_fetch_credentials");
+  assert.ok(!fetcherCode.includes('rpc("get_gmail_fetch_credentials")'), "Obsolete get_gmail_fetch_credentials call removed");
+});
+
+test("Defect 2: Prevents repeated email classification & protects open proposals", () => {
+  // Simulate queue items and review proposals
+  const queue = [
+    { id: "q1", mailbox: "govardhanreddy.vys7@gmail.com", message_id: "m1", processing_status: "pending", review_status: "pending" },
+    { id: "q2", mailbox: "govardhanreddy.vys7@gmail.com", message_id: "m2", processing_status: "pending", review_status: "requires_review" }, // Already submitted
+    { id: "q3", mailbox: "govardhanreddy.vys7@gmail.com", message_id: "m3", processing_status: "pending", review_status: "pending" },
+  ];
+  const reviews = new Map([
+    ["govardhanreddy.vys7@gmail.com:m2", { id: "r2", state: "open", reason_code: "rejection" }],
+  ]);
+
+  // jf_grok_list_pending_emails filter logic:
+  // Must have processing_status = 'pending', review_status = 'pending', and NOT exist in recruitment_review_items
+  function getEligiblePendingMessages(qList, rMap) {
+    return qList.filter(q =>
+      q.processing_status === "pending" &&
+      q.review_status === "pending" &&
+      !rMap.has(`${q.mailbox}:${q.message_id}`)
+    );
+  }
+
+  // Initial list: only q1 and q3 are returned (q2 is excluded because review_status is requires_review and review exists)
+  const initialEligible = getEligiblePendingMessages(queue, reviews);
+  assert.equal(initialEligible.length, 2);
+  assert.deepEqual(initialEligible.map(i => i.id), ["q1", "q3"]);
+
+  // Submit proposal for q1
+  function submitProposal(qId, classification, confidence, idempotencyKey) {
+    const q = queue.find(item => item.id === qId);
+    if (!q) throw new Error("Queue item not found");
+
+    // Check duplicate idempotency key
+    if (idempotencyKey && q.classification_result?.idempotency_key === idempotencyKey) {
+      return { status: "idempotent_duplicate", queue_id: q.id, classification: q.classification_result.classification };
+    }
+
+    const key = `${q.mailbox}:${q.message_id}`;
+    const existing = reviews.get(key);
+    if (existing) {
+      if (existing.state === "resolved" || existing.state === "ignored") {
+        return { status: "already_resolved", review_item_id: existing.id, state: existing.state };
+      }
+      return { status: "proposal_exists", review_item_id: existing.id, state: "open" };
+    }
+
+    // Insert new review
+    const newReviewId = `r_${q.id}`;
+    reviews.set(key, { id: newReviewId, state: "open", reason_code: classification });
+
+    // Atomically update queue record
+    q.review_status = "requires_review";
+    q.classification_result = { classification, confidence, idempotency_key: idempotencyKey };
+
+    return { status: "submitted", review_item_id: newReviewId, queue_id: q.id };
+  }
+
+  // 1. Submit proposal for q1
+  const subRes = submitProposal("q1", "interview_invitation", 0.95, "idem-111");
+  assert.equal(subRes.status, "submitted");
+
+  // 2. Verify q1 is immediately excluded from subsequent pending email listings
+  const afterSubmitEligible = getEligiblePendingMessages(queue, reviews);
+  assert.equal(afterSubmitEligible.length, 1);
+  assert.equal(afterSubmitEligible[0].id, "q3");
+
+  // 3. Duplicate idempotency key returns original result
+  const dupRes = submitProposal("q1", "interview_invitation", 0.95, "idem-111");
+  assert.equal(dupRes.status, "idempotent_duplicate");
+  assert.equal(dupRes.queue_id, "q1");
+
+  // 4. Different idempotency key on existing open proposal does NOT overwrite
+  const overwriteAttempt = submitProposal("q1", "rejection", 0.99, "idem-222");
+  assert.equal(overwriteAttempt.status, "proposal_exists");
+  assert.equal(overwriteAttempt.state, "open");
+  assert.equal(reviews.get("govardhanreddy.vys7@gmail.com:m1").reason_code, "interview_invitation"); // Kept original
+
+  // 5. Resolved or ignored proposal is preserved
+  reviews.set("govardhanreddy.vys7@gmail.com:m3", { id: "r3", state: "resolved", reason_code: "offer" });
+  const resolvedAttempt = submitProposal("q3", "rejection", 0.88, "idem-333");
+  assert.equal(resolvedAttempt.status, "already_resolved");
+  assert.equal(resolvedAttempt.state, "resolved");
+});
+
+test("Defect 3: Stable Keyset Pagination strictly aligns with (message_timestamp ASC, id ASC)", () => {
+  // Generate 25 records with varied timestamps, identical timestamps, and random UUID ordering
+  const records = [
+    { id: "00000000-0000-0000-0000-000000000005", owner_id: DESIGNATED_OWNER_UUID, message_timestamp: "2026-11-09T10:00:00Z" },
+    { id: "00000000-0000-0000-0000-000000000001", owner_id: DESIGNATED_OWNER_UUID, message_timestamp: "2026-11-09T10:00:00Z" }, // Identical timestamp, lower ID
+    { id: "00000000-0000-0000-0000-000000000003", owner_id: DESIGNATED_OWNER_UUID, message_timestamp: "2026-11-09T10:00:00Z" }, // Identical timestamp
+    { id: "00000000-0000-0000-0000-000000000002", owner_id: DESIGNATED_OWNER_UUID, message_timestamp: "2026-11-09T10:05:00Z" },
+    { id: "00000000-0000-0000-0000-000000000004", owner_id: DESIGNATED_OWNER_UUID, message_timestamp: "2026-11-09T10:10:00Z" },
+    { id: "00000000-0000-0000-0000-000000000010", owner_id: DESIGNATED_OWNER_UUID, message_timestamp: "2026-11-09T10:15:00Z" },
+    { id: "00000000-0000-0000-0000-000000000008", owner_id: DESIGNATED_OWNER_UUID, message_timestamp: "2026-11-09T10:20:00Z" },
+    { id: "00000000-0000-0000-0000-000000000009", owner_id: DESIGNATED_OWNER_UUID, message_timestamp: "2026-11-09T10:25:00Z" },
+    { id: "00000000-0000-0000-0000-000000000006", owner_id: DESIGNATED_OWNER_UUID, message_timestamp: "2026-11-09T10:30:00Z" },
+    { id: "00000000-0000-0000-0000-000000000007", owner_id: DESIGNATED_OWNER_UUID, message_timestamp: "2026-11-09T10:35:00Z" },
+    { id: "00000000-0000-0000-0000-000000000015", owner_id: DESIGNATED_OWNER_UUID, message_timestamp: "2026-11-09T10:40:00Z" },
+    { id: "00000000-0000-0000-0000-000000000012", owner_id: DESIGNATED_OWNER_UUID, message_timestamp: "2026-11-09T10:45:00Z" },
+    { id: "00000000-0000-0000-0000-000000000014", owner_id: DESIGNATED_OWNER_UUID, message_timestamp: "2026-11-09T10:50:00Z" },
+    { id: "00000000-0000-0000-0000-000000000011", owner_id: DESIGNATED_OWNER_UUID, message_timestamp: "2026-11-09T10:55:00Z" },
+    { id: "00000000-0000-0000-0000-000000000013", owner_id: DESIGNATED_OWNER_UUID, message_timestamp: "2026-11-09T11:00:00Z" },
+  ];
+
+  // Stable keyset comparator: (timestamp ASC, id ASC)
+  function compareKeyset(a, b) {
+    const tA = new Date(a.message_timestamp).getTime();
+    const tB = new Date(b.message_timestamp).getTime();
+    if (tA !== tB) return tA - tB;
+    return a.id.localeCompare(b.id);
+  }
+
+  // Sorted ground truth
+  const sortedGroundTruth = [...records].sort(compareKeyset);
+
+  // Keyset paginator function simulating jf_grok_list_pending_emails
+  function paginatePending(limit, afterId, ownerId = DESIGNATED_OWNER_UUID) {
+    let cursor = null;
+    if (afterId != null) {
+      cursor = records.find(r => r.id === afterId && r.owner_id === ownerId);
+      if (!cursor) {
+        throw new Error(`Cursor record ${afterId} not found or ineligible for owner`);
+      }
+    }
+
+    const filtered = sortedGroundTruth.filter(r => {
+      if (r.owner_id !== ownerId) return false;
+      if (!cursor) return true;
+      return compareKeyset(r, cursor) > 0;
+    });
+
+    const pageSize = Math.min(limit, 10);
+    const slice = filtered.slice(0, pageSize);
+    const hasMore = filtered.length > pageSize;
+    const nextCursor = hasMore ? slice[slice.length - 1].id : null;
+
+    return {
+      messages: slice,
+      count: slice.length,
+      has_more: hasMore,
+      next_cursor: nextCursor,
+    };
+  }
+
+  // 1. Cursor owner verification: foreign owner cursor throws error
+  assert.throws(
+    () => paginatePending(5, "00000000-0000-0000-0000-000000000001", "other-owner-uuid"),
+    /ineligible for owner/
+  );
+
+  // 2. Non-existent cursor throws error
+  assert.throws(
+    () => paginatePending(5, "ffffffff-ffff-ffff-ffff-ffffffffffff"),
+    /not found or ineligible/
+  );
+
+  // 3. Paginate through all 15 records with limit = 5
+  const page1 = paginatePending(5, null);
+  assert.equal(page1.count, 5);
+  assert.equal(page1.has_more, true);
+  assert.ok(page1.next_cursor);
+
+  // In page 1, check identical timestamps order: id 001, then 003, then 005
+  assert.equal(page1.messages[0].id, "00000000-0000-0000-0000-000000000001");
+  assert.equal(page1.messages[1].id, "00000000-0000-0000-0000-000000000003");
+  assert.equal(page1.messages[2].id, "00000000-0000-0000-0000-000000000005");
+
+  const page2 = paginatePending(5, page1.next_cursor);
+  assert.equal(page2.count, 5);
+  assert.equal(page2.has_more, true);
+  assert.ok(page2.next_cursor);
+
+  const page3 = paginatePending(5, page2.next_cursor);
+  assert.equal(page3.count, 5);
+  assert.equal(page3.has_more, false);
+  assert.equal(page3.next_cursor, null);
+
+  // Verify all 15 records retrieved with zero duplicates and zero missing items
+  const allIds = [
+    ...page1.messages.map(m => m.id),
+    ...page2.messages.map(m => m.id),
+    ...page3.messages.map(m => m.id),
+  ];
+  assert.equal(allIds.length, 15);
+  const idSet = new Set(allIds);
+  assert.equal(idSet.size, 15);
+  assert.deepEqual(allIds, sortedGroundTruth.map(r => r.id));
+
+  // 4. Restart pagination from scratch
+  const restartPage1 = paginatePending(5, null);
+  assert.deepEqual(restartPage1.messages.map(m => m.id), page1.messages.map(m => m.id));
+});
+
 
 
