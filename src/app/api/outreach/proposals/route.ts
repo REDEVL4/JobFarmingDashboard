@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedOwner } from "@/lib/supabase/server";
-import { resolveOutreachProposal } from "@/lib/data-service";
+import { resolveOutreachProposal, fetchOutreachProposalById } from "@/lib/data-service";
 
 const OUTREACH_TRIGGER_URL =
   process.env.NEXT_PUBLIC_SUPABASE_URL
@@ -109,6 +109,41 @@ export async function POST(req: NextRequest) {
     console.error("[api/outreach/proposals] Unexpected error:", err);
     return NextResponse.json(
       { error: "An unexpected error occurred while processing the outreach proposal." },
+      { status: 500 }
+    );
+  }
+}
+
+export async function GET(req: NextRequest) {
+  try {
+    const auth = await getAuthenticatedOwner();
+    if (!auth.success) {
+      return NextResponse.json(
+        { error: auth.error || "Authentication required." },
+        { status: auth.reason === "unauthenticated" ? 401 : 403 }
+      );
+    }
+
+    const { searchParams } = new URL(req.url);
+    const id = searchParams.get("id");
+
+    if (!id) {
+      return NextResponse.json(
+        { error: "Bad Request: id parameter is required." },
+        { status: 400 }
+      );
+    }
+
+    const result = await fetchOutreachProposalById(id);
+    if (!result.data && result.error) {
+      return NextResponse.json({ error: result.error }, { status: 500 });
+    }
+
+    return NextResponse.json({ success: true, data: result.data });
+  } catch (err: any) {
+    console.error("[api/outreach/proposals GET] Error:", err);
+    return NextResponse.json(
+      { error: "An unexpected error occurred while fetching the proposal." },
       { status: 500 }
     );
   }

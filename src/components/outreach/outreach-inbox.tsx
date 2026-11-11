@@ -17,6 +17,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   Zap,
+  Sparkles,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn, formatDateTime, formatRelativeTime } from "@/lib/utils";
@@ -45,6 +46,11 @@ function getInitials(name: string): string {
   if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
+
+const OUTREACH_REGENERATE_URL =
+  process.env.NEXT_PUBLIC_SUPABASE_URL
+    ? `${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/outreach-regenerate`
+    : "https://mldtysploensrrulchdl.supabase.co/functions/v1/outreach-regenerate";
 
 export function OutreachInbox({
   conversations,
@@ -81,12 +87,27 @@ export function OutreachInbox({
   );
   const [errorFeedback, setErrorFeedback] = useState<string | null>(null);
 
+  // Rewrite & Customize State
+  const [customizeInstruction, setCustomizeInstruction] = useState("");
+  const [isRewriting, setIsRewriting] = useState(false);
+  const pollTimerRef = useRef<NodeJS.Timeout | null>(null);
+
   // Refs to preserve user edits during refreshes
   const savedProposalTextRef = useRef<string>(
     activeProposal?.approved_text || activeProposal?.proposed_text || ""
   );
   const prevContactIdRef = useRef<string | null>(selectedContactId);
   const prevProposalIdRef = useRef<string | null>(activeProposal?.id || null);
+
+  // Cleanup polling interval on unmount
+  useEffect(() => {
+    return () => {
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    };
+  }, []);
 
   // Sync state when selected contact or proposals change from server
   useEffect(() => {
@@ -104,6 +125,13 @@ export function OutreachInbox({
     setErrorFeedback(null);
 
     if (isDifferentContact || isDifferentProposal) {
+      // Switched contact or proposal: cancel any active rewriting poll
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+      setIsRewriting(false);
+
       // Switched contact or proposal: load the new proposal text
       setComposerText(newSavedText);
       savedProposalTextRef.current = newSavedText;
@@ -315,6 +343,123 @@ export function OutreachInbox({
     } finally {
       setIsResolving(false);
     }
+  };
+
+  const handleRegenerate = async () => {
+    if (
+      !activeProposal ||
+      activeProposal.state !== "pending_approval" ||
+      isRewriting ||
+      isResolving
+    ) {
+      return;
+    }
+
+    setIsRewriting(true);
+    setErrorFeedback(null);
+
+    const originalProposedText = activeProposal.proposed_text || "";
+    const proposalId = activeProposal.id;
+    const instruction =
+      customizeInstruction.trim() || "regenerate, more natural, show curiosity";
+
+    try {
+      const supabase = createClient();
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token =
+        sessionData?.session?.access_token ||
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+        "";
+
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (token) {
+        headers["Authorization"] = `Bearer ${token}`;
+      }
+
+      const res = await fetch(OUTREACH_REGENERATE_URL, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          proposal_id: proposalId,
+          instruction,
+        }),
+      });
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => null);
+        console.warn("[outreach-regenerate] trigger returned status:", res.status, errJson);
+        if (res.status === 401 || res.status === 403 || res.status === 404) {
+          setErrorFeedback(errJson?.error || "Failed to trigger rewrite");
+          setIsRewriting(false);
+          return;
+        }
+      }
+    } catch (err: any) {
+      console.error("[outreach-regenerate] error calling function:", err);
+    }
+
+    // Poll the proposal every 2 seconds until proposed_text changes or 45 seconds pass
+    const startTime = Date.now();
+    const MAX_DURATION_MS = 45000;
+
+    if (pollTimerRef.current) {
+      clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+
+    const checkProposal = async () => {
+      const elapsed = Date.now() - startTime;
+      if (elapsed >= MAX_DURATION_MS) {
+        if (pollTimerRef.current) {
+          clearInterval(pollTimerRef.current);
+          pollTimerRef.current = null;
+        }
+        setIsRewriting(false);
+        return;
+      }
+
+      try {
+        const pollRes = await fetch(`/api/outreach/proposals?id=${proposalId}`);
+        if (!pollRes.ok) return;
+
+        const pollJson = await pollRes.json();
+        const updated = pollJson.data;
+
+        if (updated && updated.id === proposalId) {
+          if (updated.proposed_text && updated.proposed_text !== originalProposedText) {
+            // Text updated
+            if (pollTimerRef.current) {
+              clearInterval(pollTimerRef.current);
+              pollTimerRef.current = null;
+            }
+
+            // Replace the draft text
+            setComposerText(updated.proposed_text);
+            savedProposalTextRef.current = updated.proposed_text;
+
+            // Update proposals in local state
+            setProposals((prev) =>
+              prev.map((p) =>
+                p.id === proposalId ? { ...p, proposed_text: updated.proposed_text } : p
+              )
+            );
+
+            // Clear rewriting state
+            setIsRewriting(false);
+
+            startTransition(() => {
+              router.refresh();
+            });
+          }
+        }
+      } catch (pollErr) {
+        console.error("[outreach-regenerate] polling check failed:", pollErr);
+      }
+    };
+
+    pollTimerRef.current = setInterval(checkProposal, 2000);
   };
 
   const contactName = selectedContact?.full_name || selectedContact?.name || "";
@@ -672,6 +817,12 @@ export function OutreachInbox({
                     <span className="font-semibold text-foreground flex items-center gap-1.5">
                       <Bot className="h-3.5 w-3.5 text-primary" />
                       <span>Bot Draft ({activeProposal.channel || "LinkedIn"})</span>
+                      {isRewriting && (
+                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30 animate-pulse">
+                          <RotateCw className="h-2.5 w-2.5 animate-spin" />
+                          Rewriting...
+                        </span>
+                      )}
                     </span>
                     <span className="font-mono text-[10px]">
                       {composerText.length} characters
@@ -684,13 +835,20 @@ export function OutreachInbox({
                     </p>
                   )}
 
+                  {isRewriting && (
+                    <div className="flex items-center gap-2 p-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-700 dark:text-amber-300 text-xs">
+                      <RotateCw className="h-3.5 w-3.5 animate-spin shrink-0 text-amber-600 dark:text-amber-400" />
+                      <span>Rewriting... Waiting for updated proposal.</span>
+                    </div>
+                  )}
+
                   <textarea
                     value={composerText}
                     onChange={(e) => setComposerText(e.target.value)}
                     rows={3}
-                    disabled={isResolving}
+                    disabled={isResolving || isRewriting}
                     placeholder="Edit message..."
-                    className="w-full resize-y p-2.5 text-xs rounded-lg border border-input bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring transition-all"
+                    className="w-full resize-y p-2.5 text-xs rounded-lg border border-input bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring transition-all disabled:opacity-70"
                   />
 
                   {errorFeedback && (
@@ -700,17 +858,55 @@ export function OutreachInbox({
                     </div>
                   )}
 
-                  <div className="flex items-center justify-between pt-1">
-                    <span className="text-[11px] text-muted-foreground">
-                      Approve to queue for bot send
-                    </span>
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pt-1">
+                    {/* Customize & Regenerate Controls */}
+                    <div className="flex items-center gap-1.5 flex-1 min-w-0">
+                      <label
+                        htmlFor="outreach-customize-input"
+                        className="text-[11px] font-semibold text-muted-foreground shrink-0"
+                      >
+                        Customize
+                      </label>
+                      <input
+                        id="outreach-customize-input"
+                        type="text"
+                        placeholder="more natural, show curiosity"
+                        value={customizeInstruction}
+                        onChange={(e) => setCustomizeInstruction(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            handleRegenerate();
+                          }
+                        }}
+                        disabled={isResolving || isRewriting}
+                        className="h-7 px-2.5 text-xs bg-background border border-input rounded-md text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring flex-1 max-w-xs transition-colors disabled:opacity-50"
+                      />
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={isResolving || isRewriting}
+                        onClick={handleRegenerate}
+                        className="h-7 text-xs font-medium gap-1 px-2.5 border-border text-foreground hover:bg-muted shrink-0 cursor-pointer disabled:cursor-not-allowed"
+                        title="Regenerate proposal draft"
+                      >
+                        {isRewriting ? (
+                          <RotateCw className="h-3 w-3 animate-spin" />
+                        ) : (
+                          <Sparkles className="h-3 w-3 text-amber-500" />
+                        )}
+                        <span>{isRewriting ? "Rewriting..." : "Regenerate"}</span>
+                      </Button>
+                    </div>
 
-                    <div className="flex items-center gap-2">
+                    {/* Approve & Reject Controls */}
+                    <div className="flex items-center gap-2 shrink-0">
                       <Button
                         size="sm"
-                        disabled={isResolving}
+                        disabled={isResolving || isRewriting}
                         onClick={handleApproveProposal}
-                        className="h-7 text-xs bg-emerald-600 hover:bg-emerald-700 text-white font-medium gap-1 px-3 shadow-xs"
+                        className="h-7 text-xs bg-emerald-600 hover:bg-emerald-700 text-white font-medium gap-1 px-3 shadow-xs cursor-pointer disabled:cursor-not-allowed"
                       >
                         {isResolving ? (
                           <RotateCw className="h-3 w-3 animate-spin" />
@@ -723,9 +919,9 @@ export function OutreachInbox({
                       <Button
                         size="sm"
                         variant="outline"
-                        disabled={isResolving}
+                        disabled={isResolving || isRewriting}
                         onClick={handleRejectProposal}
-                        className="h-7 text-xs text-rose-600 hover:text-rose-700 hover:bg-rose-50 dark:hover:bg-rose-950/20 font-medium gap-1 px-3 border-border"
+                        className="h-7 text-xs text-rose-600 hover:text-rose-700 hover:bg-rose-50 dark:hover:bg-rose-950/20 font-medium gap-1 px-3 border-border cursor-pointer disabled:cursor-not-allowed"
                       >
                         <X className="h-3 w-3" />
                         <span>Reject</span>

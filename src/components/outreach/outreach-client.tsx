@@ -1,7 +1,8 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import Link from "next/link";
+import { createClient } from "@/lib/supabase/client";
 import {
   Users,
   ShieldAlert,
@@ -45,6 +46,18 @@ export function OutreachClient({ initialStats, initialProposals = [], status, er
   const [copiedProposalId, setCopiedProposalId] = useState<string | null>(null);
   const [proposalFeedback, setProposalFeedback] = useState<{ id: string; type: "success" | "error"; text: string } | null>(null);
   const [activeFilter, setActiveFilter] = useState<string>("all");
+
+  // Rewrite / Customize State for Bot Drafts
+  const [customInstructions, setCustomInstructions] = useState<Record<string, string>>({});
+  const [rewritingProposalIds, setRewritingProposalIds] = useState<Record<string, boolean>>({});
+  const pollTimersRef = useRef<Record<string, NodeJS.Timeout>>({});
+
+  useEffect(() => {
+    return () => {
+      Object.values(pollTimersRef.current).forEach((timer) => clearInterval(timer));
+      pollTimersRef.current = {};
+    };
+  }, []);
 
   const pendingCount = contacts.filter((c) => c.status === "draft_pending_approval").length;
   const approvedCount = contacts.filter((c) => c.status === "approved").length;
@@ -149,6 +162,117 @@ export function OutreachClient({ initialStats, initialProposals = [], status, er
     } finally {
       setResolvingProposalId(null);
     }
+  };
+
+  const handleRegenerateProposal = async (proposal: OutreachProposal) => {
+    const proposalId = proposal.id;
+    if (rewritingProposalIds[proposalId] || resolvingProposalId === proposalId) return;
+
+    setRewritingProposalIds((prev) => ({ ...prev, [proposalId]: true }));
+    setProposalFeedback(null);
+
+    const originalProposedText = proposal.proposed_text || "";
+    const instruction =
+      (customInstructions[proposalId] || "").trim() ||
+      "regenerate, more natural, show curiosity";
+
+    try {
+      const supabase = createClient();
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token =
+        sessionData?.session?.access_token ||
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+        "";
+
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (token) {
+        headers["Authorization"] = `Bearer ${token}`;
+      }
+
+      const res = await fetch(
+        "https://mldtysploensrrulchdl.supabase.co/functions/v1/outreach-regenerate",
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            proposal_id: proposalId,
+            instruction,
+          }),
+        }
+      );
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => null);
+        if (res.status === 401 || res.status === 403 || res.status === 404) {
+          setProposalFeedback({
+            id: proposalId,
+            type: "error",
+            text: errJson?.error || "Failed to trigger rewrite.",
+          });
+          setRewritingProposalIds((prev) => ({ ...prev, [proposalId]: false }));
+          return;
+        }
+      }
+    } catch (err: any) {
+      console.error("[outreach-client] regenerate error:", err);
+    }
+
+    // 2-second polling loop up to 45 seconds
+    const startTime = Date.now();
+    const MAX_DURATION_MS = 45000;
+
+    if (pollTimersRef.current[proposalId]) {
+      clearInterval(pollTimersRef.current[proposalId]);
+      delete pollTimersRef.current[proposalId];
+    }
+
+    const checkProposal = async () => {
+      const elapsed = Date.now() - startTime;
+      if (elapsed >= MAX_DURATION_MS) {
+        if (pollTimersRef.current[proposalId]) {
+          clearInterval(pollTimersRef.current[proposalId]);
+          delete pollTimersRef.current[proposalId];
+        }
+        setRewritingProposalIds((prev) => ({ ...prev, [proposalId]: false }));
+        return;
+      }
+
+      try {
+        const pollRes = await fetch(`/api/outreach/proposals?id=${proposalId}`);
+        if (!pollRes.ok) return;
+
+        const pollJson = await pollRes.json();
+        const updated = pollJson.data;
+
+        if (updated && updated.id === proposalId) {
+          if (updated.proposed_text && updated.proposed_text !== originalProposedText) {
+            if (pollTimersRef.current[proposalId]) {
+              clearInterval(pollTimersRef.current[proposalId]);
+              delete pollTimersRef.current[proposalId];
+            }
+
+            setProposalTexts((prev) => ({
+              ...prev,
+              [proposalId]: updated.proposed_text,
+            }));
+
+            setProposals((prev) =>
+              prev.map((p) =>
+                p.id === proposalId ? { ...p, proposed_text: updated.proposed_text } : p
+              )
+            );
+
+            setRewritingProposalIds((prev) => ({ ...prev, [proposalId]: false }));
+          }
+        }
+      } catch (pollErr) {
+        console.error("[outreach-client] poll error:", pollErr);
+      }
+    };
+
+    pollTimersRef.current[proposalId] = setInterval(checkProposal, 2000);
   };
 
   const handleCopy = async (id: string, text: string) => {
@@ -538,7 +662,15 @@ export function OutreachClient({ initialStats, initialProposals = [], status, er
                     {/* Editable Textarea */}
                     <div className="space-y-1.5">
                       <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-                        <span className="font-medium text-foreground">Draft Message Text:</span>
+                        <span className="font-medium text-foreground flex items-center gap-1.5">
+                          <span>Draft Message Text:</span>
+                          {rewritingProposalIds[proposal.id] && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30 animate-pulse">
+                              <RotateCw className="h-2.5 w-2.5 animate-spin" />
+                              Rewriting...
+                            </span>
+                          )}
+                        </span>
                         <span className="font-mono text-[10px]">
                           {(proposalTexts[proposal.id] ?? proposal.proposed_text).length} chars
                         </span>
@@ -552,7 +684,7 @@ export function OutreachClient({ initialStats, initialProposals = [], status, er
                           }))
                         }
                         rows={3}
-                        disabled={isResolving || !isPending}
+                        disabled={isResolving || !isPending || rewritingProposalIds[proposal.id]}
                         className="w-full p-2.5 text-xs rounded-lg border border-input bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-y disabled:opacity-75"
                         placeholder="Proposed outreach text..."
                       />
@@ -574,31 +706,80 @@ export function OutreachClient({ initialStats, initialProposals = [], status, er
 
                     {/* Action Buttons for Pending */}
                     {isPending && (
-                      <div className="flex items-center gap-2 pt-1 border-t border-border/40">
-                        <Button
-                          size="sm"
-                          disabled={isResolving}
-                          onClick={() => handleApproveProposal(proposal)}
-                          className="h-7 text-xs bg-emerald-600 hover:bg-emerald-700 text-white gap-1"
-                        >
-                          {isResolving ? (
-                            <RotateCw className="h-3.5 w-3.5 animate-spin mr-1" />
-                          ) : (
-                            <Check className="h-3.5 w-3.5" />
-                          )}
-                          <span>Approve</span>
-                        </Button>
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pt-1 border-t border-border/40">
+                        {/* Customize & Regenerate Controls */}
+                        <div className="flex items-center gap-1.5 flex-1 min-w-0">
+                          <label
+                            htmlFor={`customize-${proposal.id}`}
+                            className="text-[11px] font-semibold text-muted-foreground shrink-0"
+                          >
+                            Customize
+                          </label>
+                          <input
+                            id={`customize-${proposal.id}`}
+                            type="text"
+                            placeholder="more natural, show curiosity"
+                            value={customInstructions[proposal.id] || ""}
+                            onChange={(e) =>
+                              setCustomInstructions((prev) => ({
+                                ...prev,
+                                [proposal.id]: e.target.value,
+                              }))
+                            }
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                handleRegenerateProposal(proposal);
+                              }
+                            }}
+                            disabled={isResolving || rewritingProposalIds[proposal.id]}
+                            className="h-7 px-2.5 text-xs bg-background border border-input rounded-md text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring flex-1 max-w-xs transition-colors disabled:opacity-50"
+                          />
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            disabled={isResolving || rewritingProposalIds[proposal.id]}
+                            onClick={() => handleRegenerateProposal(proposal)}
+                            className="h-7 text-xs font-medium gap-1 px-2.5 border-border text-foreground hover:bg-muted shrink-0 cursor-pointer disabled:cursor-not-allowed"
+                            title="Regenerate proposal draft"
+                          >
+                            {rewritingProposalIds[proposal.id] ? (
+                              <RotateCw className="h-3 w-3 animate-spin" />
+                            ) : (
+                              <Sparkles className="h-3 w-3 text-amber-500" />
+                            )}
+                            <span>{rewritingProposalIds[proposal.id] ? "Rewriting..." : "Regenerate"}</span>
+                          </Button>
+                        </div>
 
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={isResolving}
-                          onClick={() => handleRejectProposal(proposal.id)}
-                          className="h-7 text-xs text-rose-600 hover:text-rose-700 hover:bg-rose-50 dark:hover:bg-rose-950/20 gap-1"
-                        >
-                          <X className="h-3.5 w-3.5" />
-                          <span>Reject</span>
-                        </Button>
+                        {/* Approve & Reject Controls */}
+                        <div className="flex items-center gap-2 shrink-0">
+                          <Button
+                            size="sm"
+                            disabled={isResolving || rewritingProposalIds[proposal.id]}
+                            onClick={() => handleApproveProposal(proposal)}
+                            className="h-7 text-xs bg-emerald-600 hover:bg-emerald-700 text-white gap-1 cursor-pointer disabled:cursor-not-allowed"
+                          >
+                            {isResolving ? (
+                              <RotateCw className="h-3.5 w-3.5 animate-spin mr-1" />
+                            ) : (
+                              <Check className="h-3.5 w-3.5" />
+                            )}
+                            <span>Approve</span>
+                          </Button>
+
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={isResolving || rewritingProposalIds[proposal.id]}
+                            onClick={() => handleRejectProposal(proposal.id)}
+                            className="h-7 text-xs text-rose-600 hover:text-rose-700 hover:bg-rose-50 dark:hover:bg-rose-950/20 gap-1 border-border cursor-pointer disabled:cursor-not-allowed"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                            <span>Reject</span>
+                          </Button>
+                        </div>
                       </div>
                     )}
                   </div>

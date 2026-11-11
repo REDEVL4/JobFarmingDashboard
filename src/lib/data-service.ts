@@ -724,6 +724,62 @@ export async function fetchOutreachProposals(): Promise<DataResult<OutreachPropo
 }
 
 /**
+ * Fetches a single outreach proposal by ID.
+ */
+export async function fetchOutreachProposalById(
+  proposalId: string
+): Promise<DataResult<OutreachProposal | null>> {
+  try {
+    const auth = await getAuthenticatedOwner();
+    if (!auth.success) {
+      return {
+        data: null,
+        status: auth.reason === "unauthenticated" ? "unauthenticated" : "permission_denied",
+        error: auth.error,
+      };
+    }
+
+    let { data, error } = await auth.client
+      .from("jf_outreach_proposals")
+      .select("*")
+      .eq("id", proposalId)
+      .maybeSingle();
+
+    if (error && error.code === "42P01") {
+      const fallback = await auth.client
+        .from("outreach_proposals")
+        .select("*")
+        .eq("id", proposalId)
+        .maybeSingle();
+      data = fallback.data;
+      error = fallback.error;
+    }
+
+    if (error) {
+      console.error("Supabase query error for outreach proposal by ID:", error.message);
+      return {
+        data: null,
+        status: "connection_error",
+        error: error.message,
+      };
+    }
+
+    return {
+      data: (data as OutreachProposal) || null,
+      status: "success",
+      error: null,
+    };
+  } catch (err: any) {
+    console.error("fetchOutreachProposalById exception:", err?.message || err);
+    return {
+      data: null,
+      status: "connection_error",
+      error: err?.message || "Failed to load outreach proposal",
+    };
+  }
+}
+
+/**
  * Resolves an outreach proposal by approving or rejecting it.
  * Updates the row in jobbot.outreach_proposals via Supabase.
  */
