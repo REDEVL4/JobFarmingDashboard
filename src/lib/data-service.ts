@@ -8,6 +8,7 @@ import type {
   OutreachProposal,
   OutreachInteraction,
   OutreachConversationItem,
+  OutreachSettings,
   DataResult,
 } from "@/types/dashboard";
 import type {
@@ -1137,49 +1138,95 @@ export async function fetchOutreachConversations(): Promise<DataResult<OutreachC
 }
 
 /**
- * Reads the current outreach mode from public.jf_outreach_settings for the signed-in owner.
- * Returns "review" | "auto" (defaults to "review").
+ * Reads all outreach settings from rpc jf_outreach_settings for the signed-in owner.
+ * Returns { outreach_mode, auto_connection_requests, auto_accept_connections }.
  */
-export async function fetchOutreachMode(): Promise<DataResult<"review" | "auto">> {
+export async function fetchOutreachSettings(): Promise<DataResult<OutreachSettings>> {
   try {
     const auth = await getAuthenticatedOwner();
     if (!auth.success) {
       return {
-        data: "review",
+        data: {
+          outreach_mode: "review",
+          auto_connection_requests: false,
+          auto_accept_connections: false,
+        },
         status: auth.reason === "unauthenticated" ? "unauthenticated" : "permission_denied",
         error: auth.error,
       };
     }
 
+    // 1. Try RPC jf_outreach_settings
+    const { data: rpcData, error: rpcError } = await auth.client.rpc("jf_outreach_settings");
+    if (!rpcError && rpcData) {
+      const row = Array.isArray(rpcData) ? rpcData[0] : rpcData;
+      if (row) {
+        return {
+          data: {
+            outreach_mode: (row.outreach_mode || "review").toLowerCase() === "auto" ? "auto" : "review",
+            auto_connection_requests: Boolean(row.auto_connection_requests),
+            auto_accept_connections: Boolean(row.auto_accept_connections),
+          },
+          status: "success",
+          error: null,
+        };
+      }
+    }
+
+    // 2. Fallback to querying jf_outreach_settings view/table directly
     const { data, error } = await auth.client
       .from("jf_outreach_settings")
-      .select("outreach_mode")
+      .select("outreach_mode, auto_connection_requests, auto_accept_connections")
       .eq("owner_id", auth.user.id)
       .maybeSingle();
 
     if (error) {
-      console.error("[fetchOutreachMode] error:", error);
+      console.error("[fetchOutreachSettings] error:", error);
       return {
-        data: "review",
+        data: {
+          outreach_mode: "review",
+          auto_connection_requests: false,
+          auto_accept_connections: false,
+        },
         status: "connection_error",
         error: error.message,
       };
     }
 
-    const mode = (data?.outreach_mode || "review").toLowerCase() === "auto" ? "auto" : "review";
     return {
-      data: mode,
+      data: {
+        outreach_mode: (data?.outreach_mode || "review").toLowerCase() === "auto" ? "auto" : "review",
+        auto_connection_requests: Boolean(data?.auto_connection_requests),
+        auto_accept_connections: Boolean(data?.auto_accept_connections),
+      },
       status: "success",
       error: null,
     };
   } catch (err: any) {
-    console.error("[fetchOutreachMode] exception:", err);
+    console.error("[fetchOutreachSettings] exception:", err);
     return {
-      data: "review",
+      data: {
+        outreach_mode: "review",
+        auto_connection_requests: false,
+        auto_accept_connections: false,
+      },
       status: "connection_error",
-      error: err?.message || "Failed to load outreach mode",
+      error: err?.message || "Failed to load outreach settings",
     };
   }
+}
+
+/**
+ * Reads the current outreach mode from public.jf_outreach_settings for the signed-in owner.
+ * Returns "review" | "auto" (defaults to "review").
+ */
+export async function fetchOutreachMode(): Promise<DataResult<"review" | "auto">> {
+  const result = await fetchOutreachSettings();
+  return {
+    data: result.data?.outreach_mode || "review",
+    status: result.status,
+    error: result.error,
+  };
 }
 
 /**
@@ -1208,5 +1255,59 @@ export async function setOutreachMode(
   } catch (err: any) {
     console.error("[setOutreachMode] exception:", err);
     return { success: false, error: err?.message || "Failed to set outreach mode" };
+  }
+}
+
+/**
+ * Updates auto_connection_requests by invoking public.jf_set_auto_connection_requests RPC.
+ */
+export async function setAutoConnectionRequests(
+  enabled: boolean
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const auth = await getAuthenticatedOwner();
+    if (!auth.success) {
+      return { success: false, error: auth.error };
+    }
+
+    const { error } = await auth.client.rpc("jf_set_auto_connection_requests", {
+      p_enabled: enabled,
+    });
+    if (error) {
+      console.error("[setAutoConnectionRequests] RPC error:", error);
+      return { success: false, error: error.message };
+    }
+
+    return { success: true };
+  } catch (err: any) {
+    console.error("[setAutoConnectionRequests] exception:", err);
+    return { success: false, error: err?.message || "Failed to set auto connection requests" };
+  }
+}
+
+/**
+ * Updates auto_accept_connections by invoking public.jf_set_auto_accept_connections RPC.
+ */
+export async function setAutoAcceptConnections(
+  enabled: boolean
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const auth = await getAuthenticatedOwner();
+    if (!auth.success) {
+      return { success: false, error: auth.error };
+    }
+
+    const { error } = await auth.client.rpc("jf_set_auto_accept_connections", {
+      p_enabled: enabled,
+    });
+    if (error) {
+      console.error("[setAutoAcceptConnections] RPC error:", error);
+      return { success: false, error: error.message };
+    }
+
+    return { success: true };
+  } catch (err: any) {
+    console.error("[setAutoAcceptConnections] exception:", err);
+    return { success: false, error: err?.message || "Failed to set auto-accept connections" };
   }
 }

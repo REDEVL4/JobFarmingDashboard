@@ -18,6 +18,8 @@ import {
   ShieldCheck,
   Zap,
   Sparkles,
+  UserPlus,
+  UserCheck,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn, formatDateTime, formatRelativeTime } from "@/lib/utils";
@@ -36,6 +38,8 @@ interface OutreachInboxProps {
   initialInteractions: OutreachInteraction[];
   initialProposals: OutreachProposal[];
   initialOutreachMode?: "review" | "auto";
+  initialAutoConnectionRequests?: boolean;
+  initialAutoAcceptConnections?: boolean;
 }
 
 function getInitials(name: string): string {
@@ -59,6 +63,8 @@ export function OutreachInbox({
   initialInteractions,
   initialProposals,
   initialOutreachMode = "review",
+  initialAutoConnectionRequests = false,
+  initialAutoAcceptConnections = false,
 }: OutreachInboxProps) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
@@ -72,6 +78,14 @@ export function OutreachInbox({
   // Outreach mode state ("review" | "auto")
   const [outreachMode, setOutreachMode] = useState<"review" | "auto">(initialOutreachMode);
   const [isUpdatingMode, setIsUpdatingMode] = useState(false);
+
+  // Auto connection requests toggle state
+  const [autoConnectionRequests, setAutoConnectionRequests] = useState<boolean>(initialAutoConnectionRequests);
+  const [isUpdatingConn, setIsUpdatingConn] = useState(false);
+
+  // Auto-accept connection requests toggle state
+  const [autoAcceptConnections, setAutoAcceptConnections] = useState<boolean>(initialAutoAcceptConnections);
+  const [isUpdatingAccept, setIsUpdatingAccept] = useState(false);
 
   // Active proposal in pending_approval (or approved_for_send)
   const activeProposal = proposals.find(
@@ -223,10 +237,49 @@ export function OutreachInbox({
     }, 600);
   };
 
-  // Sync outreach mode if prop updates
+  // Read current settings directly from rpc jf_outreach_settings on mount
+  useEffect(() => {
+    let isMounted = true;
+    async function loadSettingsFromRpc() {
+      try {
+        const supabase = createClient();
+        const { data, error } = await supabase.rpc("jf_outreach_settings");
+        if (!error && data && isMounted) {
+          const row = Array.isArray(data) ? data[0] : data;
+          if (row) {
+            if (row.outreach_mode) {
+              setOutreachMode(row.outreach_mode === "auto" ? "auto" : "review");
+            }
+            if (typeof row.auto_connection_requests === "boolean") {
+              setAutoConnectionRequests(row.auto_connection_requests);
+            }
+            if (typeof row.auto_accept_connections === "boolean") {
+              setAutoAcceptConnections(row.auto_accept_connections);
+            }
+          }
+        }
+      } catch (err) {
+        console.error("Failed to read rpc jf_outreach_settings:", err);
+      }
+    }
+    loadSettingsFromRpc();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // Sync outreach settings if props update
   useEffect(() => {
     setOutreachMode(initialOutreachMode);
   }, [initialOutreachMode]);
+
+  useEffect(() => {
+    setAutoConnectionRequests(initialAutoConnectionRequests);
+  }, [initialAutoConnectionRequests]);
+
+  useEffect(() => {
+    setAutoAcceptConnections(initialAutoAcceptConnections);
+  }, [initialAutoAcceptConnections]);
 
   const handleModeChange = async (newMode: "review" | "auto") => {
     if (newMode === outreachMode || isUpdatingMode) return;
@@ -257,6 +310,70 @@ export function OutreachInbox({
       setOutreachMode(previousMode);
     } finally {
       setIsUpdatingMode(false);
+    }
+  };
+
+  const handleToggleAutoConnectionRequests = async (newValue: boolean) => {
+    if (outreachMode === "review" || isUpdatingConn) return;
+    const previousValue = autoConnectionRequests;
+    setAutoConnectionRequests(newValue);
+    setIsUpdatingConn(true);
+
+    try {
+      const supabase = createClient();
+      const { error: rpcError } = await supabase.rpc("jf_set_auto_connection_requests", {
+        p_enabled: newValue,
+      });
+
+      if (rpcError) {
+        console.warn("Browser RPC jf_set_auto_connection_requests warning, falling back to server API:", rpcError);
+        const res = await fetch("/api/outreach/settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ auto_connection_requests: newValue }),
+        });
+        if (!res.ok) {
+          const json = await res.json().catch(() => ({}));
+          throw new Error(json.error || "Failed to update auto connection requests");
+        }
+      }
+    } catch (err: any) {
+      console.error("Failed to update auto connection requests:", err);
+      setAutoConnectionRequests(previousValue);
+    } finally {
+      setIsUpdatingConn(false);
+    }
+  };
+
+  const handleToggleAutoAcceptConnections = async (newValue: boolean) => {
+    if (isUpdatingAccept) return;
+    const previousValue = autoAcceptConnections;
+    setAutoAcceptConnections(newValue);
+    setIsUpdatingAccept(true);
+
+    try {
+      const supabase = createClient();
+      const { error: rpcError } = await supabase.rpc("jf_set_auto_accept_connections", {
+        p_enabled: newValue,
+      });
+
+      if (rpcError) {
+        console.warn("Browser RPC jf_set_auto_accept_connections warning, falling back to server API:", rpcError);
+        const res = await fetch("/api/outreach/settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ auto_accept_connections: newValue }),
+        });
+        if (!res.ok) {
+          const json = await res.json().catch(() => ({}));
+          throw new Error(json.error || "Failed to update auto-accept connections");
+        }
+      }
+    } catch (err: any) {
+      console.error("Failed to update auto-accept connections:", err);
+      setAutoAcceptConnections(previousValue);
+    } finally {
+      setIsUpdatingAccept(false);
     }
   };
 
@@ -480,46 +597,120 @@ export function OutreachInbox({
           selectedContactId ? "hidden md:flex" : "flex"
         )}
       >
-        {/* Outreach Mode Control Header on Left Pane */}
-        <div className="p-3 border-b border-border bg-card space-y-1.5">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-xs font-bold text-foreground">Outreach Mode</span>
-            <div className="inline-flex items-center bg-muted/80 p-0.5 rounded-lg border border-border">
+        {/* Outreach Settings Controls Header on Left Pane */}
+        <div className="p-3 border-b border-border bg-card space-y-2.5">
+          {/* 1. Outreach Mode */}
+          <div className="space-y-1">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-bold text-foreground">Outreach Mode</span>
+              <div className="inline-flex items-center bg-muted/80 p-0.5 rounded-lg border border-border">
+                <button
+                  type="button"
+                  disabled={isUpdatingMode}
+                  onClick={() => handleModeChange("review")}
+                  className={cn(
+                    "px-2.5 py-1 text-[11px] font-semibold rounded-md transition-all flex items-center gap-1 cursor-pointer",
+                    outreachMode === "review"
+                      ? "bg-background text-foreground shadow-xs font-bold"
+                      : "text-muted-foreground hover:text-foreground"
+                  )}
+                  title="Review: You approve every draft."
+                >
+                  <ShieldCheck className="h-3 w-3" />
+                  <span>Review</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={isUpdatingMode}
+                  onClick={() => handleModeChange("auto")}
+                  className={cn(
+                    "px-2.5 py-1 text-[11px] font-semibold rounded-md transition-all flex items-center gap-1 cursor-pointer",
+                    outreachMode === "auto"
+                      ? "bg-emerald-600 text-white shadow-xs font-bold"
+                      : "text-muted-foreground hover:text-foreground"
+                  )}
+                  title="Auto: Messages send without a click. Connection requests still wait for you."
+                >
+                  <Zap className="h-3 w-3" />
+                  <span>Auto</span>
+                </button>
+              </div>
+            </div>
+            <p className="text-[10px] text-muted-foreground leading-tight">
+              {modeDescription}
+            </p>
+          </div>
+
+          {/* 2. Auto connection requests */}
+          <div className="space-y-1 pt-2 border-t border-border/40">
+            <div className="flex items-center justify-between gap-2">
+              <span
+                className={cn(
+                  "text-xs font-semibold transition-colors",
+                  outreachMode === "review" ? "text-muted-foreground/60" : "text-foreground"
+                )}
+              >
+                Auto connection requests
+              </span>
               <button
                 type="button"
-                disabled={isUpdatingMode}
-                onClick={() => handleModeChange("review")}
+                role="switch"
+                aria-checked={autoConnectionRequests}
+                disabled={outreachMode === "review" || isUpdatingConn}
+                onClick={() => handleToggleAutoConnectionRequests(!autoConnectionRequests)}
                 className={cn(
-                  "px-2.5 py-1 text-[11px] font-semibold rounded-md transition-all flex items-center gap-1 cursor-pointer",
-                  outreachMode === "review"
-                    ? "bg-background text-foreground shadow-xs font-bold"
-                    : "text-muted-foreground hover:text-foreground"
+                  "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-1 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-40",
+                  autoConnectionRequests && outreachMode !== "review"
+                    ? "bg-emerald-600"
+                    : "bg-muted-foreground/30"
                 )}
-                title="Review: You approve every draft."
+                title="When Auto is on, connection requests send without a click."
               >
-                <ShieldCheck className="h-3 w-3" />
-                <span>Review</span>
-              </button>
-              <button
-                type="button"
-                disabled={isUpdatingMode}
-                onClick={() => handleModeChange("auto")}
-                className={cn(
-                  "px-2.5 py-1 text-[11px] font-semibold rounded-md transition-all flex items-center gap-1 cursor-pointer",
-                  outreachMode === "auto"
-                    ? "bg-emerald-600 text-white shadow-xs font-bold"
-                    : "text-muted-foreground hover:text-foreground"
-                )}
-                title="Auto: Messages send without a click. Connection requests still wait for you."
-              >
-                <Zap className="h-3 w-3" />
-                <span>Auto</span>
+                <span
+                  className={cn(
+                    "pointer-events-none inline-block h-4 w-4 transform rounded-full bg-background shadow-xs ring-0 transition duration-200 ease-in-out",
+                    autoConnectionRequests && outreachMode !== "review"
+                      ? "translate-x-4"
+                      : "translate-x-0"
+                  )}
+                />
               </button>
             </div>
+            <p className="text-[10px] text-muted-foreground leading-tight">
+              When Auto is on, connection requests send without a click.
+            </p>
           </div>
-          <p className="text-[10px] text-muted-foreground leading-tight">
-            {modeDescription}
-          </p>
+
+          {/* 3. Auto-accept connection requests */}
+          <div className="space-y-1 pt-2 border-t border-border/40">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-semibold text-foreground">
+                Auto-accept connection requests
+              </span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={autoAcceptConnections}
+                disabled={isUpdatingAccept}
+                onClick={() => handleToggleAutoAcceptConnections(!autoAcceptConnections)}
+                className={cn(
+                  "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-1 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-40",
+                  autoAcceptConnections ? "bg-emerald-600" : "bg-muted-foreground/30"
+                )}
+                title="Accept incoming LinkedIn invites without a click."
+              >
+                <span
+                  className={cn(
+                    "pointer-events-none inline-block h-4 w-4 transform rounded-full bg-background shadow-xs ring-0 transition duration-200 ease-in-out",
+                    autoAcceptConnections ? "translate-x-4" : "translate-x-0"
+                  )}
+                />
+              </button>
+            </div>
+            <p className="text-[10px] text-muted-foreground leading-tight">
+              Accept incoming LinkedIn invites without a click.
+            </p>
+          </div>
         </div>
 
         {/* Search Header */}
@@ -636,8 +827,8 @@ export function OutreachInbox({
           </div>
         ) : (
           <>
-            {/* Thread Header with Outreach Mode Control, Refresh & Contact Details */}
-            <header className="h-14 px-4 border-b border-border bg-card/60 backdrop-blur-xs flex items-center justify-between gap-3 shrink-0">
+            {/* Thread Header with Outreach Controls, Refresh & Contact Details */}
+            <header className="min-h-14 py-2 px-4 border-b border-border bg-card/60 backdrop-blur-xs flex flex-wrap items-center justify-between gap-3 shrink-0">
               <div className="flex items-center gap-2.5 min-w-0">
                 {/* Mobile Back Button */}
                 <Link
@@ -668,9 +859,9 @@ export function OutreachInbox({
                 </div>
               </div>
 
-              {/* Header Right Actions: Mode Switch + Refresh + LinkedIn Link */}
-              <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-                {/* Two-state Outreach Mode Switch (Header Control) */}
+              {/* Header Right Actions: Mode Switch + Auto Connect + Auto Accept + Refresh + LinkedIn Link */}
+              <div className="flex flex-wrap items-center gap-2 sm:gap-3 shrink-0">
+                {/* 1. Two-state Outreach Mode Switch (Header Control) */}
                 <div className="flex flex-col items-end text-right">
                   <div className="flex items-center gap-1.5">
                     <span className="text-[10px] uppercase font-semibold text-muted-foreground tracking-wider hidden sm:inline">
@@ -708,10 +899,97 @@ export function OutreachInbox({
                     </div>
                   </div>
                   <span
-                    className="text-[9px] text-muted-foreground hidden lg:inline max-w-[260px] truncate"
+                    className="text-[9px] text-muted-foreground hidden 2xl:inline max-w-[200px] truncate"
                     title={modeDescription}
                   >
                     {modeDescription}
+                  </span>
+                </div>
+
+                {/* 2. Auto connection requests Toggle */}
+                <div className="flex flex-col items-end text-right">
+                  <div
+                    className="flex items-center gap-1.5"
+                    title="When Auto is on, connection requests send without a click."
+                  >
+                    <span
+                      className={cn(
+                        "text-[10px] font-semibold tracking-tight hidden sm:inline",
+                        outreachMode === "review" ? "text-muted-foreground/60" : "text-foreground"
+                      )}
+                    >
+                      Auto connection requests:
+                    </span>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={autoConnectionRequests}
+                      disabled={outreachMode === "review" || isUpdatingConn}
+                      onClick={() =>
+                        handleToggleAutoConnectionRequests(!autoConnectionRequests)
+                      }
+                      className={cn(
+                        "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-1 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-40",
+                        autoConnectionRequests && outreachMode !== "review"
+                          ? "bg-emerald-600"
+                          : "bg-muted-foreground/30"
+                      )}
+                      title="When Auto is on, connection requests send without a click."
+                    >
+                      <span
+                        className={cn(
+                          "pointer-events-none inline-block h-4 w-4 transform rounded-full bg-background shadow-xs ring-0 transition duration-200 ease-in-out",
+                          autoConnectionRequests && outreachMode !== "review"
+                            ? "translate-x-4"
+                            : "translate-x-0"
+                        )}
+                      />
+                    </button>
+                  </div>
+                  <span
+                    className="text-[9px] text-muted-foreground hidden 2xl:inline max-w-[200px] truncate"
+                    title="When Auto is on, connection requests send without a click."
+                  >
+                    When Auto is on, connection requests send without a click.
+                  </span>
+                </div>
+
+                {/* 3. Auto-accept connection requests Toggle */}
+                <div className="flex flex-col items-end text-right">
+                  <div
+                    className="flex items-center gap-1.5"
+                    title="Accept incoming LinkedIn invites without a click."
+                  >
+                    <span className="text-[10px] font-semibold text-foreground tracking-tight hidden sm:inline">
+                      Auto-accept connection requests:
+                    </span>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={autoAcceptConnections}
+                      disabled={isUpdatingAccept}
+                      onClick={() =>
+                        handleToggleAutoAcceptConnections(!autoAcceptConnections)
+                      }
+                      className={cn(
+                        "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-1 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-40",
+                        autoAcceptConnections ? "bg-emerald-600" : "bg-muted-foreground/30"
+                      )}
+                      title="Accept incoming LinkedIn invites without a click."
+                    >
+                      <span
+                        className={cn(
+                          "pointer-events-none inline-block h-4 w-4 transform rounded-full bg-background shadow-xs ring-0 transition duration-200 ease-in-out",
+                          autoAcceptConnections ? "translate-x-4" : "translate-x-0"
+                        )}
+                      />
+                    </button>
+                  </div>
+                  <span
+                    className="text-[9px] text-muted-foreground hidden 2xl:inline max-w-[200px] truncate"
+                    title="Accept incoming LinkedIn invites without a click."
+                  >
+                    Accept incoming LinkedIn invites without a click.
                   </span>
                 </div>
 

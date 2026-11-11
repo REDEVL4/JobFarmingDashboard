@@ -3,6 +3,12 @@ import type { DbApplication, DbJob, DbEmailEvent, DbOutreachContact, DbOutreachP
 export type OutreachProposal = DbOutreachProposal;
 export type OutreachInteraction = DbOutreachInteraction;
 
+export interface OutreachSettings {
+  outreach_mode: "review" | "auto";
+  auto_connection_requests: boolean;
+  auto_accept_connections: boolean;
+}
+
 export interface OutreachConversationItem {
   id: string;
   full_name: string;

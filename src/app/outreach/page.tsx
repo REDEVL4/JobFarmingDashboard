@@ -2,20 +2,24 @@ import React from "react";
 import {
   fetchOutreachConversations,
   fetchContactOutreachThread,
-  fetchOutreachMode,
+  fetchOutreachSettings,
 } from "@/lib/data-service";
 import { OutreachInbox } from "@/components/outreach/outreach-inbox";
 
 export const dynamic = "force-dynamic";
 
 export default async function OutreachPage() {
-  const [conversationsResult, modeResult] = await Promise.all([
+  const [conversationsResult, settingsResult] = await Promise.all([
     fetchOutreachConversations(),
-    fetchOutreachMode(),
+    fetchOutreachSettings(),
   ]);
 
   const conversations = conversationsResult.data || [];
-  const outreachMode = modeResult.data || "review";
+  const settings = settingsResult.data || {
+    outreach_mode: "review",
+    auto_connection_requests: false,
+    auto_accept_connections: false,
+  };
 
   if (conversations.length === 0) {
     return (
@@ -25,7 +29,9 @@ export default async function OutreachPage() {
         selectedContact={null}
         initialInteractions={[]}
         initialProposals={[]}
-        initialOutreachMode={outreachMode}
+        initialOutreachMode={settings.outreach_mode}
+        initialAutoConnectionRequests={settings.auto_connection_requests}
+        initialAutoAcceptConnections={settings.auto_accept_connections}
       />
     );
   }
@@ -41,7 +47,9 @@ export default async function OutreachPage() {
       selectedContact={threadResult.data.contact}
       initialInteractions={threadResult.data.interactions}
       initialProposals={threadResult.data.proposals}
-      initialOutreachMode={outreachMode}
+      initialOutreachMode={settings.outreach_mode}
+      initialAutoConnectionRequests={settings.auto_connection_requests}
+      initialAutoAcceptConnections={settings.auto_accept_connections}
     />
   );
 }
