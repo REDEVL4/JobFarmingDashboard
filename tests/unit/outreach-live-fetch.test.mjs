@@ -75,3 +75,4 @@ test("Live Fetch: button labels and subtitles adhere to requirements", () => {
   assert.equal(labelFetching, "Fetching…");
   assert.equal(subtitle, "Pull the latest LinkedIn threads now. Does not send anything.");
 });
+
