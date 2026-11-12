@@ -88,6 +88,14 @@ export function OutreachInbox({
   const [autoAcceptConnections, setAutoAcceptConnections] = useState<boolean>(initialAutoAcceptConnections);
   const [isUpdatingAccept, setIsUpdatingAccept] = useState(false);
 
+  // Live Fetch Messages State
+  const [isFetchingLive, setIsFetchingLive] = useState(false);
+  const [liveFetchFeedback, setLiveFetchFeedback] = useState<{
+    type: "success" | "error";
+    text: string;
+  } | null>(null);
+  const liveFetchTimerRef = useRef<NodeJS.Timeout | null>(null);
+
   // Active proposal in pending_approval (or approved_for_send)
   const activeProposal = proposals.find(
     (p) => p.state === "pending_approval" || p.state === "approved_for_send"
@@ -120,6 +128,10 @@ export function OutreachInbox({
       if (pollTimerRef.current) {
         clearInterval(pollTimerRef.current);
         pollTimerRef.current = null;
+      }
+      if (liveFetchTimerRef.current) {
+        clearInterval(liveFetchTimerRef.current);
+        liveFetchTimerRef.current = null;
       }
     };
   }, []);
@@ -375,6 +387,121 @@ export function OutreachInbox({
       setAutoAcceptConnections(previousValue);
     } finally {
       setIsUpdatingAccept(false);
+    }
+  };
+
+  const handleFetchLiveMessages = async () => {
+    if (isFetchingLive) return;
+
+    if (liveFetchTimerRef.current) {
+      clearInterval(liveFetchTimerRef.current);
+      liveFetchTimerRef.current = null;
+    }
+
+    setIsFetchingLive(true);
+    setLiveFetchFeedback(null);
+
+    try {
+      const supabase = createClient();
+      let resData: any = null;
+
+      const { data: rpcData, error: rpcError } = await supabase.rpc(
+        "jf_request_linkedin_live_fetch"
+      );
+
+      if (rpcError) {
+        console.warn(
+          "Browser RPC jf_request_linkedin_live_fetch warning, falling back to server API:",
+          rpcError
+        );
+        const apiRes = await fetch("/api/outreach/live-fetch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+        });
+        const json = await apiRes.json().catch(() => ({}));
+        if (!apiRes.ok || !json.data) {
+          throw new Error(json.error || rpcError.message || "Failed to start live fetch");
+        }
+        resData = json.data;
+      } else {
+        resData = rpcData;
+      }
+
+      if (resData?.ok === false) {
+        throw new Error(resData.error || "Failed to start live fetch");
+      }
+
+      const fetchId = resData?.fetch_id;
+      if (!fetchId) {
+        throw new Error("No fetch_id returned from live fetch request");
+      }
+
+      // If already_running is true, poll that fetch_id. Do not start a second one.
+      const pollStatus = async () => {
+        try {
+          let status: any = null;
+          const { data: sData, error: sError } = await supabase.rpc(
+            "jf_linkedin_live_fetch_status",
+            { p_fetch_id: fetchId }
+          );
+
+          if (sError) {
+            const apiRes = await fetch(
+              `/api/outreach/live-fetch?fetch_id=${encodeURIComponent(fetchId)}`
+            );
+            const json = await apiRes.json().catch(() => ({}));
+            if (apiRes.ok && json.data) {
+              status = json.data;
+            } else {
+              console.warn("Poll status check failed:", sError.message);
+              return;
+            }
+          } else {
+            status = sData;
+          }
+
+          if (!status) return;
+
+          if (status.state === "done") {
+            if (liveFetchTimerRef.current) {
+              clearInterval(liveFetchTimerRef.current);
+              liveFetchTimerRef.current = null;
+            }
+            setIsFetchingLive(false);
+            const nNew = status.messages_new ?? 0;
+            const mHad = status.messages_duplicate ?? 0;
+            setLiveFetchFeedback({
+              type: "success",
+              text: `Fetched. ${nNew} new, ${mHad} already had.`,
+            });
+            startTransition(() => {
+              router.refresh();
+            });
+          } else if (status.state === "failed") {
+            if (liveFetchTimerRef.current) {
+              clearInterval(liveFetchTimerRef.current);
+              liveFetchTimerRef.current = null;
+            }
+            setIsFetchingLive(false);
+            setLiveFetchFeedback({
+              type: "error",
+              text: status.error || "Fetch failed",
+            });
+          }
+        } catch (pollErr: any) {
+          console.error("Live fetch polling error:", pollErr);
+        }
+      };
+
+      liveFetchTimerRef.current = setInterval(pollStatus, 5000);
+      pollStatus();
+    } catch (err: any) {
+      console.error("Failed to request live fetch:", err);
+      setIsFetchingLive(false);
+      setLiveFetchFeedback({
+        type: "error",
+        text: err?.message || "Failed to start live fetch",
+      });
     }
   };
 
@@ -712,6 +839,59 @@ export function OutreachInbox({
               Accept incoming LinkedIn invites without a click.
             </p>
           </div>
+
+          {/* 4. Fetch live messages */}
+          <div className="space-y-1.5 pt-2 border-t border-border/40">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-semibold text-foreground">
+                Fetch live messages
+              </span>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={isFetchingLive}
+                onClick={handleFetchLiveMessages}
+                className={cn(
+                  "h-7 px-2.5 text-xs font-medium gap-1.5 border-border bg-background hover:bg-muted text-foreground transition-colors shrink-0",
+                  isFetchingLive && "cursor-not-allowed opacity-75"
+                )}
+                title="Pull the latest LinkedIn threads now. Does not send anything."
+              >
+                {isFetchingLive ? (
+                  <>
+                    <RotateCw className="h-3 w-3 animate-spin text-primary" />
+                    <span>Fetching…</span>
+                  </>
+                ) : (
+                  <>
+                    <RotateCw className="h-3 w-3 text-muted-foreground" />
+                    <span>Fetch live messages</span>
+                  </>
+                )}
+              </Button>
+            </div>
+            <p className="text-[10px] text-muted-foreground leading-tight">
+              Pull the latest LinkedIn threads now. Does not send anything.
+            </p>
+            {liveFetchFeedback && (
+              <div
+                className={cn(
+                  "text-[11px] p-2 rounded-md border flex items-start gap-1.5 transition-all",
+                  liveFetchFeedback.type === "success"
+                    ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/20"
+                    : "bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/20"
+                )}
+              >
+                {liveFetchFeedback.type === "success" ? (
+                  <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+                ) : (
+                  <ShieldAlert className="h-3.5 w-3.5 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
+                )}
+                <span className="font-medium leading-snug">{liveFetchFeedback.text}</span>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Search Header */}
@@ -991,6 +1171,42 @@ export function OutreachInbox({
                     title="Accept incoming LinkedIn invites without a click."
                   >
                     Accept incoming LinkedIn invites without a click.
+                  </span>
+                </div>
+
+                {/* Fetch live messages Button */}
+                <div className="flex flex-col items-end text-right">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={isFetchingLive}
+                    onClick={handleFetchLiveMessages}
+                    className={cn(
+                      "h-7 px-2 sm:px-2.5 text-[11px] font-medium gap-1.5 border-border bg-background hover:bg-muted text-foreground transition-colors shrink-0",
+                      isFetchingLive && "cursor-not-allowed opacity-75"
+                    )}
+                    title="Pull the latest LinkedIn threads now. Does not send anything."
+                  >
+                    <RotateCw className={cn("h-3.5 w-3.5 text-muted-foreground", isFetchingLive && "animate-spin text-primary")} />
+                    <span>{isFetchingLive ? "Fetching…" : "Fetch live messages"}</span>
+                  </Button>
+                  <span
+                    className={cn(
+                      "text-[9px] hidden 2xl:inline max-w-[200px] truncate",
+                      liveFetchFeedback
+                        ? liveFetchFeedback.type === "success"
+                          ? "text-emerald-600 dark:text-emerald-400 font-semibold"
+                          : "text-rose-600 dark:text-rose-400 font-semibold"
+                        : "text-muted-foreground"
+                    )}
+                    title={
+                      liveFetchFeedback?.text ||
+                      "Pull the latest LinkedIn threads now. Does not send anything."
+                    }
+                  >
+                    {liveFetchFeedback?.text ||
+                      "Pull the latest LinkedIn threads now. Does not send anything."}
                   </span>
                 </div>
 
