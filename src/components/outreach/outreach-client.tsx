@@ -19,6 +19,7 @@ import {
   RotateCw,
   Mail,
   Sparkles,
+  FileText,
 } from "lucide-react";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -688,6 +689,33 @@ export function OutreachClient({ initialStats, initialProposals = [], status, er
                         className="w-full p-2.5 text-xs rounded-lg border border-input bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-y disabled:opacity-75"
                         placeholder="Proposed outreach text..."
                       />
+
+                      {proposal.attachment_path && (
+                        <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-border/80 bg-muted/40 text-xs text-foreground/90 w-fit max-w-full">
+                          <FileText className="h-4 w-4 text-primary shrink-0" />
+                          {proposal.action_type === "resume_share" && (
+                            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-primary/10 text-primary border border-primary/20 shrink-0">
+                              Resume attached
+                            </span>
+                          )}
+                          <span
+                            className="font-medium text-xs truncate max-w-[220px] sm:max-w-xs"
+                            title={proposal.attachment_path.split("/").pop()}
+                          >
+                            {proposal.attachment_path.split("/").pop()}
+                          </span>
+                          <a
+                            href={`/api/outreach/attachment-url?path=${encodeURIComponent(proposal.attachment_path)}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-background hover:bg-muted border border-input text-foreground transition-colors shrink-0 ml-1"
+                            title="Open attached document"
+                          >
+                            <span>Open</span>
+                            <ExternalLink className="h-3 w-3" />
+                          </a>
+                        </div>
+                      )}
                     </div>
 
                     {/* Feedback alert */}

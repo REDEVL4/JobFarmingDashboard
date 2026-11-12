@@ -193,6 +193,7 @@ export interface DbOutreachProposal {
     | string;
   approved_at?: string | null;
   sent_at?: string | null;
+  attachment_path?: string | null;
   error?: string | null;
   created_at: string;
   updated_at: string;

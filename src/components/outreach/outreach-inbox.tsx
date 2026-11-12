@@ -20,6 +20,7 @@ import {
   Sparkles,
   UserPlus,
   UserCheck,
+  FileText,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn, formatDateTime, formatRelativeTime } from "@/lib/utils";
@@ -1128,6 +1129,33 @@ export function OutreachInbox({
                     placeholder="Edit message..."
                     className="w-full resize-y p-2.5 text-xs rounded-lg border border-input bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring transition-all disabled:opacity-70"
                   />
+
+                  {activeProposal.attachment_path && (
+                    <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-border/80 bg-muted/40 text-xs text-foreground/90 w-fit max-w-full">
+                      <FileText className="h-4 w-4 text-primary shrink-0" />
+                      {activeProposal.action_type === "resume_share" && (
+                        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-primary/10 text-primary border border-primary/20 shrink-0">
+                          Resume attached
+                        </span>
+                      )}
+                      <span
+                        className="font-medium text-xs truncate max-w-[220px] sm:max-w-xs"
+                        title={activeProposal.attachment_path.split("/").pop()}
+                      >
+                        {activeProposal.attachment_path.split("/").pop()}
+                      </span>
+                      <a
+                        href={`/api/outreach/attachment-url?path=${encodeURIComponent(activeProposal.attachment_path)}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-background hover:bg-muted border border-input text-foreground transition-colors shrink-0 ml-1"
+                        title="Open attached document"
+                      >
+                        <span>Open</span>
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    </div>
+                  )}
 
                   {errorFeedback && (
                     <div className="flex items-center gap-1.5 text-xs text-rose-600 bg-rose-500/10 border border-rose-500/20 p-2 rounded-lg">
