@@ -4,11 +4,8 @@ import React, { useState, useMemo, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   Search,
-  Filter,
   Download,
   RotateCcw,
-  ChevronDown,
-  ChevronUp,
   ChevronsUpDown,
   Building,
   MapPin,
@@ -16,10 +13,11 @@ import {
   X,
   ExternalLink,
   FileText,
-  SlidersHorizontal,
   Bookmark,
   Check,
   Sparkles,
+  Target,
+  SlidersHorizontal,
 } from "lucide-react";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
@@ -27,6 +25,7 @@ import { Input } from "@/components/ui/input";
 import { formatDate } from "@/lib/utils";
 import { ApplicationDrawer } from "./application-drawer";
 import type { ApplicationViewItem, NormalizedStatus } from "@/types/dashboard";
+import { cn } from "@/lib/utils";
 
 interface ApplicationsTableProps {
   initialApplications: ApplicationViewItem[];
@@ -319,8 +318,8 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
     <div className="space-y-5">
       {/* Saved Views Pills */}
       <div className="flex items-center gap-2 overflow-x-auto pb-1 text-xs">
-        <span className="text-muted-foreground font-semibold flex items-center gap-1 shrink-0">
-          <Bookmark className="h-3.5 w-3.5" />
+        <span className="text-muted-foreground font-mono font-semibold flex items-center gap-1 shrink-0 text-[11px] uppercase tracking-wider">
+          <Bookmark className="h-3.5 w-3.5 text-cyan-400" />
           Views:
         </span>
         {SAVED_VIEWS.map((view) => {
@@ -338,11 +337,12 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
                 setTodayOnly(Boolean(view.todayOnly));
                 setCurrentPage(1);
               }}
-              className={`px-3 py-1 rounded-full font-medium transition-colors shrink-0 border ${
+              className={cn(
+                "px-3 py-1 rounded-full font-mono text-xs font-medium transition-all shrink-0 border",
                 isSelected
-                  ? "bg-primary text-primary-foreground border-transparent shadow-sm"
-                  : "bg-card text-muted-foreground hover:bg-accent border-input hover:text-foreground"
-              }`}
+                  ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/40 shadow-[0_0_10px_rgba(6,182,212,0.2)]"
+                  : "bg-slate-900/60 text-muted-foreground hover:bg-slate-800 border-border/70 hover:text-foreground"
+              )}
             >
               {view.name}
             </button>
@@ -351,19 +351,20 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
       </div>
 
       {/* Primary Status Tabs (Clickable Segmented Controls) */}
-      <div className="border rounded-xl p-1.5 bg-card/70 backdrop-blur shadow-subtle">
-        <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
+      <div className="orbital-card rounded-xl p-1.5 shadow-subtle">
+        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar">
           {STATUS_TABS.map((tab) => {
             const isSelected = selectedStatuses.includes(tab.value);
             return (
               <button
                 key={tab.value}
                 onClick={() => toggleStatus(tab.value)}
-                className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all shrink-0 select-none flex items-center gap-1.5 ${
+                className={cn(
+                  "px-3.5 py-1.5 rounded-lg text-xs font-mono font-semibold transition-all shrink-0 select-none flex items-center gap-1.5",
                   isSelected
-                    ? "bg-primary text-primary-foreground shadow-sm"
-                    : "text-muted-foreground hover:bg-muted hover:text-foreground"
-                }`}
+                    ? "bg-gradient-to-r from-blue-600 to-cyan-600 text-white shadow-[0_0_12px_rgba(59,130,246,0.35)]"
+                    : "text-muted-foreground hover:bg-slate-800/60 hover:text-foreground"
+                )}
               >
                 {isSelected && tab.value !== "all" && <Check className="h-3 w-3" />}
                 <span>{tab.label}</span>
@@ -373,181 +374,195 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
         </div>
       </div>
 
-      {/* Filter and Search Toolbar */}
-      <div className="flex flex-col md:flex-row gap-3 items-stretch md:items-center justify-between">
-        {/* Search Input */}
-        <div className="relative flex-1 max-w-md">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
-          <Input
-            value={searchQuery}
-            onChange={(e) => {
-              setSearchQuery(e.target.value);
-              setCurrentPage(1);
-            }}
-            placeholder="Search by company, role title, or notes..."
-            className="pl-9 text-xs h-9"
-          />
-          {searchQuery && (
-            <button
-              onClick={() => setSearchQuery("")}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-            >
-              <X className="h-3.5 w-3.5" />
-            </button>
-          )}
-        </div>
-
-        {/* Secondary Filter Controls */}
-        <div className="flex flex-wrap items-center gap-2">
-          {/* Remote Dropdown */}
-          <select
-            value={remoteFilter}
-            onChange={(e) => {
-              setRemoteFilter(e.target.value);
-              setCurrentPage(1);
-            }}
-            className="h-9 px-3 rounded-lg border border-input bg-background text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-          >
-            <option value="all">All Workplaces</option>
-            <option value="remote">Remote Only</option>
-            <option value="hybrid">Hybrid</option>
-            <option value="onsite">Onsite</option>
-          </select>
-
-          {/* Quick Toggle Chips */}
-          <Button
-            variant={recruiterContactedOnly ? "default" : "outline"}
-            size="sm"
-            onClick={() => setRecruiterContactedOnly(!recruiterContactedOnly)}
-            className="h-9 text-xs gap-1"
-          >
-            <span>Recruiter Contacted</span>
-          </Button>
-
-          <Button
-            variant={followUpOnly ? "default" : "outline"}
-            size="sm"
-            onClick={() => setFollowUpOnly(!followUpOnly)}
-            className="h-9 text-xs gap-1"
-          >
-            <span>Action Required</span>
-          </Button>
-
-          <Button
-            variant={autoCreatedOnly ? "default" : "outline"}
-            size="sm"
-            onClick={() => {
-              setAutoCreatedOnly(!autoCreatedOnly);
-              setCurrentPage(1);
-            }}
-            className="h-9 text-xs gap-1.5"
-          >
-            <Sparkles className="h-3.5 w-3.5 text-amber-500" />
-            <span>Auto-Created {autoCreatedCount > 0 ? `(${autoCreatedCount})` : ""}</span>
-          </Button>
-
-          <Button
-            variant={todayOnly ? "default" : "outline"}
-            size="sm"
-            onClick={() => {
-              setTodayOnly(!todayOnly);
-              setCurrentPage(1);
-            }}
-            className="h-9 text-xs gap-1.5"
-          >
-            <Calendar className="h-3.5 w-3.5 text-blue-500" />
-            <span>Today&apos;s Jobs {todayCount > 0 ? `(${todayCount})` : ""}</span>
-          </Button>
-
-          {/* Clear Filters */}
-          {hasActiveFilters && (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={resetFilters}
-              className="h-9 text-xs gap-1 text-rose-600 dark:text-rose-400 hover:text-rose-700 hover:bg-rose-50 dark:hover:bg-rose-950/30"
-            >
-              <RotateCcw className="h-3.5 w-3.5" />
-              <span>Clear</span>
-            </Button>
-          )}
-
-          {/* CSV Export */}
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={exportToCsv}
-            className="h-9 text-xs gap-1.5 ml-auto"
-            title="Export filtered records to CSV"
-          >
-            <Download className="h-3.5 w-3.5" />
-            <span>Export CSV</span>
-          </Button>
-        </div>
-      </div>
-
-      {/* Active Filter Indicators */}
-      {hasActiveFilters && (
-        <div className="flex items-center gap-2 flex-wrap text-xs text-muted-foreground pt-1">
-          <span className="font-semibold text-foreground">Active Filters:</span>
-          {todayOnly && (
-            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-blue-500/10 text-blue-700 dark:text-blue-300 border border-blue-500/20 font-medium">
-              Filter: Today&apos;s Jobs
-              <button onClick={() => setTodayOnly(false)}>
-                <X className="h-3 w-3" />
-              </button>
-            </span>
-          )}
-          {autoCreatedOnly && (
-            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/20 font-medium">
-              Filter: Auto-Created / Unknown
-              <button onClick={() => setAutoCreatedOnly(false)}>
-                <X className="h-3 w-3" />
-              </button>
-            </span>
-          )}
-          {!selectedStatuses.includes("all") &&
-            selectedStatuses.map((s) => (
-              <span
-                key={s}
-                className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-brand-500/10 text-brand-600 dark:text-brand-400 border border-brand-500/20 font-medium"
+      {/* Sticky Filter and Search Toolbar */}
+      <div className="orbital-card rounded-xl p-3 sm:p-4 space-y-3">
+        <div className="flex flex-col md:flex-row gap-3 items-stretch md:items-center justify-between">
+          {/* Search Input */}
+          <div className="relative flex-1 max-w-md">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+            <Input
+              value={searchQuery}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                setCurrentPage(1);
+              }}
+              placeholder="Search by company, role title, or notes..."
+              className="pl-9 text-xs h-9 font-mono bg-slate-900/70 border-border/80 focus:border-cyan-500/50"
+            />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery("")}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
               >
-                Status: {s}
-                <button onClick={() => toggleStatus(s)}>
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+
+          {/* Secondary Filter Controls */}
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Remote Dropdown */}
+            <select
+              value={remoteFilter}
+              onChange={(e) => {
+                setRemoteFilter(e.target.value);
+                setCurrentPage(1);
+              }}
+              className="h-9 px-3 rounded-lg border border-border/80 bg-slate-900/70 text-xs font-mono text-foreground focus:outline-none focus:border-cyan-500/50"
+            >
+              <option value="all">All Workplaces</option>
+              <option value="remote">Remote Only</option>
+              <option value="hybrid">Hybrid</option>
+              <option value="onsite">Onsite</option>
+            </select>
+
+            {/* Quick Toggle Chips */}
+            <Button
+              variant={recruiterContactedOnly ? "default" : "outline"}
+              size="sm"
+              onClick={() => setRecruiterContactedOnly(!recruiterContactedOnly)}
+              className={cn(
+                "h-9 text-xs font-mono gap-1",
+                recruiterContactedOnly
+                  ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/40"
+                  : "border-border/80 text-muted-foreground hover:text-foreground"
+              )}
+            >
+              <span>Recruiter Contacted</span>
+            </Button>
+
+            <Button
+              variant={followUpOnly ? "default" : "outline"}
+              size="sm"
+              onClick={() => setFollowUpOnly(!followUpOnly)}
+              className={cn(
+                "h-9 text-xs font-mono gap-1",
+                followUpOnly
+                  ? "bg-amber-500/20 text-amber-300 border-amber-500/40"
+                  : "border-border/80 text-muted-foreground hover:text-foreground"
+              )}
+            >
+              <span>Action Required</span>
+            </Button>
+
+            <Button
+              variant={autoCreatedOnly ? "default" : "outline"}
+              size="sm"
+              onClick={() => {
+                setAutoCreatedOnly(!autoCreatedOnly);
+                setCurrentPage(1);
+              }}
+              className={cn(
+                "h-9 text-xs font-mono gap-1.5",
+                autoCreatedOnly
+                  ? "bg-amber-500/20 text-amber-300 border-amber-500/40"
+                  : "border-border/80 text-muted-foreground hover:text-foreground"
+              )}
+            >
+              <Sparkles className="h-3 w-3 text-amber-400" />
+              <span>Auto-Created {autoCreatedCount > 0 ? `(${autoCreatedCount})` : ""}</span>
+            </Button>
+
+            <Button
+              variant={todayOnly ? "default" : "outline"}
+              size="sm"
+              onClick={() => {
+                setTodayOnly(!todayOnly);
+                setCurrentPage(1);
+              }}
+              className={cn(
+                "h-9 text-xs font-mono gap-1.5",
+                todayOnly
+                  ? "bg-blue-500/20 text-blue-300 border-blue-500/40"
+                  : "border-border/80 text-muted-foreground hover:text-foreground"
+              )}
+            >
+              <Calendar className="h-3 w-3 text-cyan-400" />
+              <span>Today&apos;s Jobs {todayCount > 0 ? `(${todayCount})` : ""}</span>
+            </Button>
+
+            {/* Clear Filters Button */}
+            {hasActiveFilters && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={resetFilters}
+                className="h-9 text-xs font-mono gap-1 text-rose-400 hover:text-rose-300 hover:bg-rose-500/10"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                <span>Clear Filters</span>
+              </Button>
+            )}
+
+            {/* CSV Export */}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={exportToCsv}
+              className="h-9 text-xs font-mono gap-1.5 ml-auto border-border/80 bg-slate-900/40 text-muted-foreground hover:text-cyan-400"
+              title="Export filtered records to CSV"
+            >
+              <Download className="h-3.5 w-3.5" />
+              <span>Export CSV</span>
+            </Button>
+          </div>
+        </div>
+
+        {/* Active Filter Indicators */}
+        {hasActiveFilters && (
+          <div className="flex items-center gap-2 flex-wrap text-xs font-mono text-muted-foreground pt-1 border-t border-border/50">
+            <span className="font-semibold text-foreground">Active Filters:</span>
+            {todayOnly && (
+              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">
+                Filter: Today&apos;s Jobs
+                <button onClick={() => setTodayOnly(false)}>
                   <X className="h-3 w-3" />
                 </button>
               </span>
-            ))}
-          {searchQuery && (
-            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-muted text-foreground border font-medium">
-              Query: &quot;{searchQuery}&quot;
-              <button onClick={() => setSearchQuery("")}>
-                <X className="h-3 w-3" />
-              </button>
+            )}
+            {autoCreatedOnly && (
+              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                Filter: Auto-Created
+                <button onClick={() => setAutoCreatedOnly(false)}>
+                  <X className="h-3 w-3" />
+                </button>
+              </span>
+            )}
+            {!selectedStatuses.includes("all") &&
+              selectedStatuses.map((s) => (
+                <span
+                  key={s}
+                  className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-cyan-500/10 text-cyan-400 border border-cyan-500/20"
+                >
+                  Status: {s}
+                  <button onClick={() => toggleStatus(s)}>
+                    <X className="h-3 w-3" />
+                  </button>
+                </span>
+              ))}
+            {searchQuery && (
+              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-slate-800 text-foreground border border-border">
+                Query: &quot;{searchQuery}&quot;
+                <button onClick={() => setSearchQuery("")}>
+                  <X className="h-3 w-3" />
+                </button>
+              </span>
+            )}
+            <span className="ml-auto font-mono text-muted-foreground text-[11px]">
+              Showing <span className="text-cyan-400 font-bold tabular-nums">{sortedApplications.length}</span> of {initialApplications.length} records
             </span>
-          )}
-          {remoteFilter !== "all" && (
-            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-muted text-foreground border font-medium">
-              Workplace: {remoteFilter}
-              <button onClick={() => setRemoteFilter("all")}>
-                <X className="h-3 w-3" />
-              </button>
-            </span>
-          )}
-          <span className="ml-auto font-medium">
-            Showing {sortedApplications.length} of {initialApplications.length} records
-          </span>
-        </div>
-      )}
+          </div>
+        )}
+      </div>
 
-      {/* Desktop Data Table */}
-      <div className="border rounded-xl bg-card overflow-hidden shadow-subtle hidden md:block">
+      {/* Desktop Data Table (>=768px) with 2-Line Smart Wrap (Zero Clipped Titles) */}
+      <div className="orbital-card rounded-xl overflow-hidden shadow-subtle hidden md:block">
         <table className="w-full text-left border-collapse text-xs">
           <thead>
-            <tr className="border-b bg-muted/40 text-muted-foreground font-semibold">
+            <tr className="border-b border-border/80 bg-slate-950/60 text-muted-foreground font-mono font-semibold">
               <th
                 onClick={() => handleSort("company")}
-                className="py-3 px-4 cursor-pointer hover:text-foreground transition-colors"
+                className="py-3 px-4 cursor-pointer hover:text-cyan-400 transition-colors"
               >
                 <div className="flex items-center gap-1.5">
                   <span>Company & Position</span>
@@ -556,7 +571,7 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
               </th>
               <th
                 onClick={() => handleSort("normalizedStatus")}
-                className="py-3 px-4 cursor-pointer hover:text-foreground transition-colors"
+                className="py-3 px-4 cursor-pointer hover:text-cyan-400 transition-colors"
               >
                 <div className="flex items-center gap-1.5">
                   <span>Status</span>
@@ -565,7 +580,7 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
               </th>
               <th
                 onClick={() => handleSort("score")}
-                className="py-3 px-4 cursor-pointer hover:text-foreground transition-colors"
+                className="py-3 px-4 cursor-pointer hover:text-cyan-400 transition-colors"
               >
                 <div className="flex items-center gap-1.5">
                   <span>Fit Score</span>
@@ -574,7 +589,7 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
               </th>
               <th
                 onClick={() => handleSort("appliedDate")}
-                className="py-3 px-4 cursor-pointer hover:text-foreground transition-colors"
+                className="py-3 px-4 cursor-pointer hover:text-cyan-400 transition-colors"
               >
                 <div className="flex items-center gap-1.5">
                   <span>Date Applied</span>
@@ -586,14 +601,14 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
               <th className="py-3 px-4 text-right">Actions</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-border">
+          <tbody className="divide-y divide-border/60">
             {paginatedApplications.length === 0 ? (
               <tr>
-                <td colSpan={7} className="py-12 text-center text-muted-foreground">
+                <td colSpan={7} className="py-12 text-center text-muted-foreground font-mono">
                   <div className="max-w-xs mx-auto space-y-2">
                     <p className="font-semibold text-foreground">No applications match your filters</p>
                     <p className="text-[11px]">Try adjusting your search query, status filters, or clear all filters.</p>
-                    <Button variant="outline" size="sm" onClick={resetFilters} className="mt-2 text-xs">
+                    <Button variant="outline" size="sm" onClick={resetFilters} className="mt-2 text-xs font-mono">
                       Reset Filters
                     </Button>
                   </div>
@@ -604,24 +619,30 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
                 <tr
                   key={app.id}
                   onClick={() => setActiveApplication(app)}
-                  className="hover:bg-muted/40 transition-colors cursor-pointer group select-none"
+                  className="hover:bg-slate-900/60 transition-colors cursor-pointer group select-none"
                 >
-                  <td className="py-3.5 px-4">
-                    <div className="space-y-0.5">
-                      <div className="font-semibold text-foreground flex items-center gap-2 group-hover:text-primary transition-colors flex-wrap">
-                        <span>{app.company}</span>
+                  {/* Company & Position with 2-Line Smart Wrap (No clipping) */}
+                  <td className="py-3 px-4 max-w-sm lg:max-w-md">
+                    <div className="space-y-1">
+                      <div className="font-semibold text-foreground flex items-center gap-2 group-hover:text-cyan-400 transition-colors flex-wrap">
+                        <span className="font-medium">{app.company}</span>
                         <span className="text-[10px] font-mono text-muted-foreground">#{app.id}</span>
                         {isAutoCreatedApplication(app) && (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 inline-flex items-center gap-1">
+                          <span className="text-[10px] px-1.5 py-0.5 rounded font-mono font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20 inline-flex items-center gap-1">
                             <Sparkles className="h-2.5 w-2.5" />
                             Auto-Created
                           </span>
                         )}
                       </div>
-                      <div className="text-muted-foreground truncate max-w-sm">{app.title}</div>
+                      {/* 2-line smart wrap replaces single-line truncate */}
+                      <div className="text-muted-foreground text-xs line-clamp-2 leading-snug">
+                        {app.title}
+                      </div>
                     </div>
                   </td>
-                  <td className="py-3.5 px-4">
+
+                  {/* Status Badge */}
+                  <td className="py-3 px-4">
                     <div className="space-y-0.5">
                       <StatusBadge status={app.normalizedStatus} />
                       {isAutoCreatedApplication(app) && app.rawStatus && (
@@ -631,31 +652,49 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
                       )}
                     </div>
                   </td>
-                  <td className="py-3.5 px-4">
+
+                  {/* Fit Score */}
+                  <td className="py-3 px-4 font-mono">
                     {app.score ? (
-                      <span className="font-semibold text-foreground">
-                        {app.score} <span className="text-muted-foreground font-normal">/ 100</span>
-                      </span>
+                      <div className="space-y-1">
+                        <span className="font-bold text-cyan-400 tabular-nums">
+                          {app.score} <span className="text-muted-foreground font-normal text-[10px]">/ 100</span>
+                        </span>
+                        <div className="h-1 w-16 bg-slate-800 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-gradient-to-r from-blue-500 to-cyan-400 rounded-full"
+                            style={{ width: `${app.score}%` }}
+                          />
+                        </div>
+                      </div>
                     ) : (
                       <span className="text-muted-foreground">—</span>
                     )}
                   </td>
-                  <td className="py-3.5 px-4 text-muted-foreground font-mono">
+
+                  {/* Date Applied */}
+                  <td className="py-3 px-4 text-muted-foreground font-mono tabular-nums">
                     {formatDate(app.appliedDate)}
                   </td>
-                  <td className="py-3.5 px-4 text-muted-foreground">
-                    <div className="flex items-center gap-1.5">
-                      <MapPin className="h-3 w-3 text-muted-foreground/70" />
+
+                  {/* Location / Remote */}
+                  <td className="py-3 px-4 text-muted-foreground text-xs font-mono">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <MapPin className="h-3 w-3 text-cyan-400" />
                       <span>{app.location}</span>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-muted font-medium ml-1">
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 font-medium">
                         {app.remoteType}
                       </span>
                     </div>
                   </td>
-                  <td className="py-3.5 px-4 text-muted-foreground font-mono">
+
+                  {/* Salary Range */}
+                  <td className="py-3 px-4 text-muted-foreground font-mono tabular-nums">
                     {app.salaryText}
                   </td>
-                  <td className="py-3.5 px-4 text-right">
+
+                  {/* Actions */}
+                  <td className="py-3 px-4 text-right">
                     <div className="flex items-center justify-end gap-1.5" onClick={(e) => e.stopPropagation()}>
                       {app.postingUrl && (
                         <a
@@ -663,7 +702,7 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
                           target="_blank"
                           rel="noopener noreferrer"
                           title="Open Original Job Posting"
-                          className="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-primary transition-colors"
+                          className="p-1.5 rounded hover:bg-slate-800 text-muted-foreground hover:text-cyan-400 transition-colors"
                         >
                           <ExternalLink className="h-3.5 w-3.5" />
                         </a>
@@ -674,7 +713,7 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
                           target="_blank"
                           rel="noopener noreferrer"
                           title="View Tailored Resume (PDF)"
-                          className="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-blue-600 dark:hover:text-blue-400 transition-colors"
+                          className="p-1.5 rounded hover:bg-slate-800 text-muted-foreground hover:text-blue-400 transition-colors"
                         >
                           <FileText className="h-3.5 w-3.5" />
                         </a>
@@ -683,7 +722,7 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
                         variant="ghost"
                         size="sm"
                         onClick={() => setActiveApplication(app)}
-                        className="h-7 text-xs text-muted-foreground hover:text-foreground ml-1"
+                        className="h-7 text-xs font-mono text-muted-foreground hover:text-cyan-400 ml-1"
                       >
                         Details →
                       </Button>
@@ -696,10 +735,10 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
         </table>
       </div>
 
-      {/* Mobile Card View */}
+      {/* Mobile Card Switcher (<768px) Touch-Friendly Tactical Cards */}
       <div className="md:hidden space-y-3">
         {paginatedApplications.length === 0 ? (
-          <div className="p-8 border rounded-xl text-center text-muted-foreground text-xs bg-card">
+          <div className="orbital-card p-8 rounded-xl text-center text-muted-foreground text-xs font-mono">
             No matching applications found.
           </div>
         ) : (
@@ -707,21 +746,24 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
             <div
               key={app.id}
               onClick={() => setActiveApplication(app)}
-              className="p-4 rounded-xl border bg-card shadow-subtle space-y-3 cursor-pointer"
+              className="orbital-card p-4 rounded-xl space-y-3 cursor-pointer select-none active:scale-[0.99] transition-transform"
             >
               <div className="flex items-start justify-between gap-2">
-                <div>
+                <div className="space-y-1 flex-1 min-w-0">
                   <div className="flex items-center gap-1.5 flex-wrap">
                     <h4 className="font-bold text-sm text-foreground">{app.company}</h4>
+                    <span className="text-[10px] font-mono text-muted-foreground">#{app.id}</span>
                     {isAutoCreatedApplication(app) && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 inline-flex items-center gap-0.5">
+                      <span className="text-[10px] px-1.5 py-0.5 rounded font-mono font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20 inline-flex items-center gap-0.5">
                         <Sparkles className="h-2.5 w-2.5" />
-                        Auto-Created
+                        Auto
                       </span>
                     )}
                   </div>
-                  <p className="text-xs text-muted-foreground">{app.title}</p>
+                  {/* 2-line smart wrap on mobile */}
+                  <p className="text-xs text-muted-foreground line-clamp-2 leading-snug">{app.title}</p>
                 </div>
+
                 <div className="text-right space-y-0.5 shrink-0">
                   <StatusBadge status={app.normalizedStatus} size="sm" />
                   {isAutoCreatedApplication(app) && app.rawStatus && (
@@ -732,29 +774,36 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-2 text-xs text-muted-foreground pt-1 border-t">
+              {/* Match Score & Metadata Row */}
+              <div className="grid grid-cols-2 gap-2 text-xs font-mono text-muted-foreground pt-2 border-t border-border/50">
                 <div>
-                  <span>Applied: </span>
-                  <span className="font-semibold text-foreground">{formatDate(app.appliedDate)}</span>
+                  <span className="text-[10px] uppercase block">Applied:</span>
+                  <span className="font-semibold text-foreground tabular-nums">{formatDate(app.appliedDate)}</span>
                 </div>
                 <div>
-                  <span>Score: </span>
-                  <span className="font-semibold text-foreground">{app.score ? `${app.score}/100` : "—"}</span>
+                  <span className="text-[10px] uppercase block">Fit Score:</span>
+                  <span className="font-semibold text-cyan-400 tabular-nums">
+                    {app.score ? `${app.score}/100` : "—"}
+                  </span>
                 </div>
-                <div className="col-span-2 truncate">
-                  <span>Location: </span>
-                  <span className="text-foreground">{app.location} ({app.remoteType})</span>
+                <div className="col-span-2 flex items-center gap-1 text-[11px] truncate">
+                  <MapPin className="h-3 w-3 text-cyan-400 shrink-0" />
+                  <span className="text-foreground truncate">{app.location}</span>
+                  <span className="text-[10px] px-1.5 py-0.2 rounded bg-slate-800 text-slate-300 ml-1">
+                    {app.remoteType}
+                  </span>
                 </div>
               </div>
 
-              <div className="flex items-center justify-between pt-1 text-xs" onClick={(e) => e.stopPropagation()}>
+              {/* Bottom Quick Links */}
+              <div className="flex items-center justify-between pt-2 border-t border-border/50 text-xs font-mono" onClick={(e) => e.stopPropagation()}>
                 <div className="flex items-center gap-2">
                   {app.postingUrl && (
                     <a
                       href={app.postingUrl}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-[11px] text-primary hover:underline font-medium"
+                      className="inline-flex items-center gap-1 text-[11px] text-cyan-400 hover:underline"
                     >
                       <ExternalLink className="h-3 w-3" />
                       Posting
@@ -765,7 +814,7 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
                       href={app.resumeUrl}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-[11px] text-blue-600 dark:text-blue-400 hover:underline font-medium"
+                      className="inline-flex items-center gap-1 text-[11px] text-blue-400 hover:underline"
                     >
                       <FileText className="h-3 w-3" />
                       Resume
@@ -776,9 +825,9 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
                   variant="ghost"
                   size="sm"
                   onClick={() => setActiveApplication(app)}
-                  className="h-6 text-[11px] text-muted-foreground"
+                  className="h-6 text-[11px] font-mono text-muted-foreground hover:text-cyan-400"
                 >
-                  View Details →
+                  View Dossier →
                 </Button>
               </div>
             </div>
@@ -787,7 +836,7 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
       </div>
 
       {/* Pagination Controls */}
-      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-muted-foreground pt-2">
+      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 text-xs font-mono text-muted-foreground pt-2">
         <div className="flex items-center gap-2">
           <span>Show:</span>
           <select
@@ -796,13 +845,13 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
               setPageSize(Number(e.target.value));
               setCurrentPage(1);
             }}
-            className="h-8 px-2 rounded border bg-background text-foreground text-xs"
+            className="h-8 px-2 rounded-lg border border-border/80 bg-slate-900 text-foreground text-xs font-mono"
           >
             <option value={10}>10 per page</option>
             <option value={25}>25 per page</option>
             <option value={50}>50 per page</option>
           </select>
-          <span>
+          <span className="tabular-nums">
             Page {currentPage} of {totalPages}
           </span>
         </div>
@@ -813,7 +862,7 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
             size="sm"
             onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
             disabled={currentPage === 1}
-            className="h-8 px-3 text-xs"
+            className="h-8 px-3 text-xs font-mono border-border/80 bg-slate-900/50"
           >
             Previous
           </Button>
@@ -822,7 +871,7 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
             size="sm"
             onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
             disabled={currentPage >= totalPages}
-            className="h-8 px-3 text-xs"
+            className="h-8 px-3 text-xs font-mono border-border/80 bg-slate-900/50"
           >
             Next
           </Button>
@@ -837,4 +886,3 @@ export function ApplicationsTable({ initialApplications }: ApplicationsTableProp
     </div>
   );
 }
-

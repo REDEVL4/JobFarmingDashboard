@@ -16,6 +16,10 @@ const config: Config = {
       },
     },
     extend: {
+      fontFamily: {
+        sans: ["var(--font-sans)", "Inter", "-apple-system", "BlinkMacSystemFont", "sans-serif"],
+        mono: ["var(--font-mono)", "JetBrains Mono", "monospace"],
+      },
       colors: {
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",
@@ -63,6 +67,20 @@ const config: Config = {
           900: "#312e81",
           950: "#1e1b4b",
         },
+        // Orbital Mission Control & Telemetry Palette
+        orbital: {
+          obsidian: "#050811",
+          slate: "#0f172a",
+          surface: "rgba(15, 23, 42, 0.75)",
+          hover: "rgba(30, 41, 59, 0.85)",
+          cyan: "#38bdf8",
+          cyanGlow: "#06b6d4",
+          cobalt: "#3b82f6",
+          emerald: "#10b981",
+          amber: "#f59e0b",
+          rose: "#f43f5e",
+          dim: "#64748b",
+        },
         status: {
           applied: {
             bg: "rgba(99, 102, 241, 0.12)",
@@ -108,8 +126,9 @@ const config: Config = {
       },
       boxShadow: {
         subtle: "0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 1px 2px 0 rgba(0, 0, 0, 0.03)",
-        card: "0 4px 6px -1px rgba(0, 0, 0, 0.04), 0 2px 4px -1px rgba(0, 0, 0, 0.02)",
-        elevation: "0 10px 15px -3px rgba(0, 0, 0, 0.06), 0 4px 6px -2px rgba(0, 0, 0, 0.03)",
+        glass: "0 8px 32px 0 rgba(0, 0, 0, 0.37)",
+        telemetry: "0 0 15px -3px rgba(56, 189, 248, 0.25)",
+        specular: "inset 0 1px 0 0 rgba(255, 255, 255, 0.08)",
       },
     },
   },
@@ -117,4 +136,3 @@ const config: Config = {
 };
 
 export default config;
-

@@ -4,7 +4,7 @@
 
 @layer base {
   :root {
-    --background: 210 20% 98%;
+    --background: 222 47% 98%;
     --foreground: 222 47% 11%;
 
     --card: 0 0% 100%;
@@ -13,7 +13,7 @@
     --popover: 0 0% 100%;
     --popover-foreground: 222 47% 11%;
 
-    --primary: 243 75% 59%;
+    --primary: 217 91% 60%;
     --primary-foreground: 210 40% 98%;
 
     --secondary: 210 40% 96.1%;
@@ -30,39 +30,42 @@
 
     --border: 214.3 31.8% 91.4%;
     --input: 214.3 31.8% 91.4%;
-    --ring: 243 75% 59%;
+    --ring: 217 91% 60%;
 
     --radius: 0.75rem;
   }
 
+  /* Deep Obsidian Orbital Dark Mode (Default / Priority Aesthetic) */
   .dark {
-    --background: 224 71% 4%;
-    --foreground: 213 31% 91%;
+    /* #050811 => 228 55% 3.1% */
+    --background: 228 55% 3.1%;
+    --foreground: 213 31% 94%;
 
-    --card: 224 71% 6%;
-    --card-foreground: 213 31% 91%;
+    /* Translucent Midnight Slate level 1 card */
+    --card: 222 47% 7%;
+    --card-foreground: 213 31% 94%;
 
-    --popover: 224 71% 6%;
-    --popover-foreground: 213 31% 91%;
+    --popover: 222 47% 7%;
+    --popover-foreground: 213 31% 94%;
 
-    --primary: 243 75% 65%;
+    --primary: 217 91% 60%;
     --primary-foreground: 222 47% 11.2%;
 
-    --secondary: 215 28% 12%;
+    --secondary: 217 33% 14%;
     --secondary-foreground: 210 40% 98%;
 
-    --muted: 215 28% 12%;
-    --muted-foreground: 217.9 10.6% 64.9%;
+    --muted: 217 33% 12%;
+    --muted-foreground: 215 20% 65%;
 
-    --accent: 215 28% 12%;
+    --accent: 217 33% 15%;
     --accent-foreground: 210 40% 98%;
 
-    --destructive: 0 62.8% 30.6%;
+    --destructive: 347 77% 50%;
     --destructive-foreground: 210 40% 98%;
 
-    --border: 215 28% 14%;
-    --input: 215 28% 14%;
-    --ring: 243 75% 65%;
+    --border: 217 33% 16%;
+    --input: 217 33% 16%;
+    --ring: 199 89% 48%;
   }
 }
 
@@ -71,36 +74,82 @@
     @apply border-border;
   }
   body {
-    @apply bg-background text-foreground antialiased selection:bg-brand-500/20 selection:text-brand-500;
+    @apply bg-background text-foreground antialiased selection:bg-sky-500/20 selection:text-sky-400;
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+
+  /* Radial cobalt mesh glow on deep obsidian */
+  .dark body {
+    background-color: #050811;
+    background-image: 
+      radial-gradient(ellipse 80% 50% at 50% -10%, rgba(37, 99, 235, 0.12), transparent 75%),
+      radial-gradient(circle 600px at 100% 10%, rgba(6, 182, 212, 0.05), transparent 60%);
+    background-attachment: fixed;
   }
 }
 
-/* Glass & Card Effects */
-.card-hover-effect {
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-}
-.card-hover-effect:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 8px 20px -4px rgba(0, 0, 0, 0.08);
-}
-.dark .card-hover-effect:hover {
-  box-shadow: 0 8px 20px -4px rgba(0, 0, 0, 0.35);
+/* Tabular Numbers Enforcement for Telemetry & KPIs */
+.tabular-nums, [data-telemetry] {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
 }
 
-/* Custom Scrollbars */
+/* Level 1 Translucent Card with Specular Border */
+.orbital-card {
+  background-color: rgba(15, 23, 42, 0.75);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.35), inset 0 1px 0 0 rgba(255, 255, 255, 0.06);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Level 2 Active / Hover Card */
+.orbital-card:hover, .orbital-card-active {
+  background-color: rgba(30, 41, 59, 0.85);
+  border-color: rgba(56, 189, 248, 0.45);
+  box-shadow: 0 8px 30px -4px rgba(6, 182, 212, 0.15), 0 0 15px -3px rgba(56, 189, 248, 0.2), inset 0 1px 0 0 rgba(255, 255, 255, 0.12);
+  transform: translateY(-1px);
+}
+
+/* Light mode fallback for cards */
+:root:not(.dark) .orbital-card {
+  background-color: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  box-shadow: 0 2px 8px -1px rgba(0, 0, 0, 0.05);
+}
+:root:not(.dark) .orbital-card:hover {
+  background-color: rgba(255, 255, 255, 0.98);
+  border-color: rgba(59, 130, 246, 0.5);
+  box-shadow: 0 6px 16px -2px rgba(59, 130, 246, 0.12);
+}
+
+/* Cyan laser active navigation bar */
+.laser-indicator {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 20px;
+  border-radius: 0 4px 4px 0;
+  background: linear-gradient(180deg, #38bdf8 0%, #06b6d4 100%);
+  box-shadow: 0 0 10px #38bdf8, 0 0 20px #06b6d4;
+}
+
+/* Custom Scrollbars for High-Tech Density */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: hsl(var(--border));
-  border-radius: 4px;
+  background: rgba(148, 163, 184, 0.25);
+  border-radius: 9999px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: hsl(var(--muted-foreground) / 0.5);
+  background: rgba(56, 189, 248, 0.45);
 }
-
