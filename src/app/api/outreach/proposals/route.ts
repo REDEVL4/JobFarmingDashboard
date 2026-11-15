@@ -56,18 +56,18 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === "create") {
-      if (!contact_id || !proposed_text?.trim()) {
+      if (!contact_id) {
         return NextResponse.json(
-          { error: "Bad Request: contact_id and non-empty proposed_text are required to create a proposal." },
+          { error: "Bad Request: contact_id is required to create a proposal." },
           { status: 400 }
         );
       }
 
       const createResult = await createOutreachProposal({
         contact_id,
-        proposed_text: proposed_text.trim(),
-        channel,
-        action_type,
+        proposed_text: proposed_text !== undefined ? proposed_text.trim() : "",
+        channel: channel || "linkedin",
+        action_type: action_type || "message",
       });
 
       if (!createResult.success) {

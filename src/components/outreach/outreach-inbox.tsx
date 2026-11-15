@@ -629,11 +629,46 @@ export function OutreachInbox({
     setIsDraftingNewMessage(true);
     setErrorFeedback(null);
 
+    let createdProposal: OutreachProposal | null = null;
+
     try {
-      const res = await fetch("/api/outreach/draft", {
+      // 1. On click, first create a new outreach_proposal for the contact with state = 'pending_approval' and action_type = 'message'
+      const createRes = await fetch("/api/outreach/proposals", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          action: "create",
+          contact_id: selectedContact.id,
+          action_type: "message",
+          channel: "linkedin",
+          proposed_text: "",
+        }),
+      });
+
+      const createJson = await createRes.json().catch(() => ({}));
+      if (!createRes.ok || !createJson.data) {
+        throw new Error(createJson.error || "Failed to create new outreach proposal");
+      }
+
+      createdProposal = createJson.data as OutreachProposal;
+
+      // Keep the new pending proposal in state and select it as active draft
+      setProposals((prev) => [createdProposal!, ...prev.filter((p) => p.id !== createdProposal!.id)]);
+      setComposerText(createdProposal.proposed_text || "");
+      savedProposalTextRef.current = createdProposal.proposed_text || "";
+      setJustApproved(false);
+
+      // 2. Then call the bot (or the regenerate endpoint) with that proposal id and the full prior thread so the bot fills in proposed_text
+      // Rule: Do not call regenerate without a proposal id
+      if (!createdProposal.id) {
+        throw new Error("Cannot call regenerate: missing proposal id");
+      }
+
+      const draftRes = await fetch("/api/outreach/draft", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          proposal_id: createdProposal.id,
           contact_id: selectedContact.id,
           contact: selectedContact,
           thread: timelineInteractions.map((int: OutreachInteraction) => ({
@@ -646,24 +681,34 @@ export function OutreachInbox({
         }),
       });
 
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok || !json.data) {
-        throw new Error(json.error || "Failed to generate message draft with bot");
+      const draftJson = await draftRes.json().catch(() => ({}));
+      if (!draftRes.ok || !draftJson.data) {
+        throw new Error(draftJson.error || "Bot failed to fill in draft text");
       }
 
-      const newProposal: OutreachProposal = json.data;
+      const updatedProposal: OutreachProposal = draftJson.data;
+      const finalText = updatedProposal.proposed_text || "";
 
-      setProposals((prev) => [newProposal, ...prev.filter((p) => p.id !== newProposal.id)]);
-      setComposerText(newProposal.proposed_text || "");
-      savedProposalTextRef.current = newProposal.proposed_text || "";
-      setJustApproved(false);
+      // 3. Show the resulting draft in the composer with Approve, Reject, and Regenerate
+      setProposals((prev) =>
+        prev.map((p) =>
+          p.id === createdProposal!.id
+            ? { ...p, proposed_text: finalText, state: "pending_approval" }
+            : p
+        )
+      );
+      setComposerText(finalText);
+      savedProposalTextRef.current = finalText;
 
       startTransition(() => {
         router.refresh();
       });
     } catch (err: any) {
-      console.error("Failed to generate bot draft:", err);
+      console.error("New message bot drafting error:", err);
+      // 4. If the call fails, show the error and keep the empty pending proposal so the owner can retry
       setErrorFeedback(err?.message || "Failed to generate bot draft");
+      // Note: createdProposal remains in `proposals` with state 'pending_approval' and empty text,
+      // so the owner can retry via the Regenerate button or edit text directly!
     } finally {
       setIsDraftingNewMessage(false);
     }
@@ -683,11 +728,14 @@ export function OutreachInbox({
       return;
     }
 
+    const proposalId = proposal.id;
+    // Rule: Do not call regenerate without a proposal id
+    if (!proposalId) return;
+
     setIsRewriting(true);
     setErrorFeedback(null);
 
     const originalProposedText = proposal.proposed_text || "";
-    const proposalId = proposal.id;
     const { instruction } = buildRegeneratePayload(proposalId, customizeInstruction);
 
     try {
@@ -711,12 +759,51 @@ export function OutreachInbox({
         body: JSON.stringify({
           proposal_id: proposalId,
           instruction,
+          contact_id: selectedContact?.id,
+          thread: timelineInteractions.map((int: OutreachInteraction) => ({
+            direction: int.direction,
+            event_type: int.event_type,
+            message_summary: int.message_summary,
+            event_at: int.event_at || int.created_at,
+          })),
         }),
       });
 
       if (!res.ok) {
         const errJson = await res.json().catch(() => null);
         console.warn("[outreach-regenerate] trigger returned status:", res.status, errJson);
+        // Fallback to /api/outreach/draft to guarantee retry succeeds
+        const draftFallbackRes = await fetch("/api/outreach/draft", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            proposal_id: proposalId,
+            contact_id: selectedContact?.id,
+            contact: selectedContact,
+            thread: timelineInteractions.map((int: OutreachInteraction) => ({
+              direction: int.direction,
+              event_type: int.event_type,
+              message_summary: int.message_summary,
+              event_at: int.event_at || int.created_at,
+            })),
+            instruction: customizeInstruction || undefined,
+          }),
+        });
+
+        if (draftFallbackRes.ok) {
+          const draftFallbackJson = await draftFallbackRes.json().catch(() => null);
+          const fallbackText = draftFallbackJson?.data?.proposed_text;
+          if (fallbackText) {
+            setComposerText(fallbackText);
+            savedProposalTextRef.current = fallbackText;
+            setProposals((prev) =>
+              prev.map((p) => (p.id === proposalId ? applyRegeneratedProposalText(p, fallbackText) : p))
+            );
+            setIsRewriting(false);
+            return;
+          }
+        }
+
         if (res.status === 401 || res.status === 403 || res.status === 404) {
           setErrorFeedback(errJson?.error || "Failed to trigger rewrite");
           setIsRewriting(false);

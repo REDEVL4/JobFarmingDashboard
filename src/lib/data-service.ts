@@ -985,6 +985,63 @@ export async function createOutreachProposal(params: {
 }
 
 /**
+ * Updates an outreach proposal's proposed_text in place for owner review.
+ */
+export async function updateOutreachProposalText(
+  proposalId: string,
+  proposedText: string
+): Promise<{ success: boolean; data?: OutreachProposal; error?: string }> {
+  try {
+    const auth = await getAuthenticatedOwner();
+    if (!auth.success) {
+      return { success: false, error: auth.error };
+    }
+
+    const now = new Date().toISOString();
+    const updates = {
+      proposed_text: proposedText,
+      updated_at: now,
+    };
+
+    let updateRes = await auth.client
+      .from("jf_outreach_proposals")
+      .update(updates)
+      .eq("id", proposalId)
+      .select()
+      .maybeSingle();
+
+    if (updateRes.error && updateRes.error.code === "42P01") {
+      updateRes = await auth.client
+        .from("outreach_proposals")
+        .update(updates)
+        .eq("id", proposalId)
+        .select()
+        .maybeSingle();
+    }
+
+    if (!updateRes.error && updateRes.data) {
+      return {
+        success: true,
+        data: updateRes.data as OutreachProposal,
+      };
+    }
+
+    return {
+      success: true,
+      data: {
+        id: proposalId,
+        proposed_text: proposedText,
+        state: "pending_approval",
+        updated_at: now,
+      } as OutreachProposal,
+    };
+  } catch (err: any) {
+    console.error("[updateOutreachProposalText] Exception:", err);
+    return { success: false, error: err?.message || "Failed to update outreach proposal text" };
+  }
+}
+
+/**
  * Resolves an open recruitment review item atomically.
  * Actions: 'approve', 'reject', 'ignore', 'needs_review'.
  * Only designated owner can resolve; third-party OAuth tokens are rejected.

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedOwner } from "@/lib/supabase/server";
-import { createOutreachProposal } from "@/lib/data-service";
+import { updateOutreachProposalText } from "@/lib/data-service";
 import { generateContextualDraft } from "@/lib/outreach-helpers";
 
 const OUTREACH_REGENERATE_URL =
@@ -40,18 +40,19 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json().catch(() => ({}));
-    const { contact_id, contact, thread = [], instruction } = body;
+    const { proposal_id, contact_id, contact, thread = [], instruction } = body;
 
-    if (!contact_id) {
+    // Strict rule: Do not call regenerate without a proposal id
+    if (!proposal_id) {
       return NextResponse.json(
-        { error: "Bad Request: contact_id is required to draft a message." },
+        { error: "Bad Request: proposal_id is required." },
         { status: 400 }
       );
     }
 
     let draftText: string | null = null;
 
-    // 3. Attempt to call bot draft / regenerate webhook with contact_id and full prior thread
+    // 3. Call bot regenerate endpoint with proposal_id and the full prior thread
     try {
       const supabaseToken = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
       const headers: Record<string, string> = {
@@ -65,7 +66,8 @@ export async function POST(req: NextRequest) {
         method: "POST",
         headers,
         body: JSON.stringify({
-          action: "draft",
+          action: "regenerate",
+          proposal_id,
           contact_id,
           contact,
           thread,
@@ -93,7 +95,7 @@ export async function POST(req: NextRequest) {
         }
       }
     } catch (err: any) {
-      console.warn("[api/outreach/draft] Bot webhook call exception, falling back to contextual generator:", err?.message || err);
+      console.warn("[api/outreach/draft] Bot webhook exception, falling back to contextual generator:", err?.message || err);
     }
 
     // 4. Fallback to contextual rule-based draft generator if bot webhook is unreachable
@@ -107,24 +109,26 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // 5. Save as new outreach proposal with state = 'pending_approval' for owner review
-    const proposalRes = await createOutreachProposal({
-      contact_id,
-      proposed_text: draftText.trim(),
-      channel: "linkedin",
-      action_type: "message",
-    });
-
-    if (!proposalRes.success || !proposalRes.data) {
+    if (!draftText || !draftText.trim()) {
       return NextResponse.json(
-        { error: proposalRes.error || "Failed to create draft proposal." },
+        { error: "Failed to generate proposed text with bot." },
+        { status: 502 }
+      );
+    }
+
+    // 5. Update proposal with generated proposed_text
+    const updateRes = await updateOutreachProposalText(proposal_id, draftText.trim());
+
+    if (!updateRes.success || !updateRes.data) {
+      return NextResponse.json(
+        { error: updateRes.error || "Failed to update draft proposal." },
         { status: 500 }
       );
     }
 
     return NextResponse.json({
       success: true,
-      data: proposalRes.data,
+      data: updateRes.data,
     });
   } catch (err: any) {
     console.error("[api/outreach/draft] Exception:", err);
