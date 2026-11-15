@@ -8,6 +8,7 @@ import {
   isDeletedOnLinkedInProposal,
   matchProposalToInteraction,
   buildOutreachTimeline,
+  generateContextualDraft,
 } from "../../src/lib/outreach-helpers.ts";
 
 test("Interaction Status: detects deleted message by is_deleted or deleted flags", () => {
@@ -244,4 +245,87 @@ test("Proposal Matcher: matches by contact_id + sent_at time + text", () => {
   ];
   const matched = matchProposalToInteraction(proposal, interactions);
   assert.equal(matched?.id, "i_matched");
+});
+
+test("Contextual Draft Generator: drafts reply to inbound recruiter message", () => {
+  const draft = generateContextualDraft({
+    contactName: "Elena Rostova",
+    company: "Stripe",
+    role: "Senior Staff Engineer",
+    thread: [
+      {
+        direction: "inbound",
+        message_summary: "Hey! Loved your profile, would you be open to chatting about our infrastructure team?",
+        event_type: "message_received",
+      },
+    ],
+  });
+
+  assert.match(draft, /Hi Elena/);
+  assert.match(draft, /Stripe/);
+  assert.match(draft, /Senior Staff Engineer/);
+  assert.match(draft, /schedule/);
+});
+
+test("Contextual Draft Generator: respects tone instructions (casual, curious)", () => {
+  const casualDraft = generateContextualDraft({
+    contactName: "Alex Chen",
+    company: "OpenAI",
+    thread: [
+      {
+        direction: "inbound",
+        message_summary: "Are you free for a call this Thursday?",
+        event_type: "message_received",
+      },
+    ],
+    instruction: "make it more casual and friendly",
+  });
+  assert.match(casualDraft, /Hi Alex/);
+  assert.match(casualDraft, /OpenAI/);
+  assert.match(casualDraft, /love to chat/);
+
+  const curiousDraft = generateContextualDraft({
+    contactName: "Alex Chen",
+    company: "OpenAI",
+    thread: [
+      {
+        direction: "inbound",
+        message_summary: "Are you free for a call this Thursday?",
+        event_type: "message_received",
+      },
+    ],
+    instruction: "show curiosity about technical challenges",
+  });
+  assert.match(curiousDraft, /technical challenges/);
+});
+
+test("Contextual Draft Generator: drafts follow-up when previous outbound messages had no reply", () => {
+  const followUpDraft = generateContextualDraft({
+    contactName: "Jordan Smith",
+    company: "Datadog",
+    thread: [
+      {
+        direction: "outbound",
+        message_summary: "Hi Jordan, wanted to reach out regarding the platform engineer role.",
+        event_type: "message_sent",
+      },
+    ],
+  });
+
+  assert.match(followUpDraft, /Hi Jordan/);
+  assert.match(followUpDraft, /following up/i);
+  assert.match(followUpDraft, /Datadog/);
+});
+
+test("Contextual Draft Generator: drafts fresh outbound outreach when thread is empty", () => {
+  const freshDraft = generateContextualDraft({
+    contactName: "Marcus Vance",
+    company: "Anthropic",
+    role: "Full Stack Engineer",
+    thread: [],
+  });
+
+  assert.match(freshDraft, /Hi Marcus/);
+  assert.match(freshDraft, /Anthropic/);
+  assert.match(freshDraft, /Full Stack Engineer/);
 });

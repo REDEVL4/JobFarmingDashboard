@@ -171,9 +171,65 @@ export function buildRegeneratePayload(
 }
 
 /**
- * Updates a proposal's proposed_text in place when bot regeneration returns,
- * ensuring the state remains 'pending_approval' for owner review.
+ * Generates a contextual outbound message draft based on conversation history,
+ * contact details, and owner instructions.
  */
+export function generateContextualDraft(params: {
+  contactName?: string | null;
+  company?: string | null;
+  role?: string | null;
+  thread?: Array<{
+    direction?: string | null;
+    message_summary?: string | null;
+    event_type?: string | null;
+  }>;
+  instruction?: string | null;
+}): string {
+  const { contactName, company, role, thread = [], instruction } = params;
+
+  // Extract contact first name
+  const rawName = (contactName || "").trim();
+  const firstName = rawName.split(/\s+/)[0] || "";
+  const nameSalutation = firstName ? `Hi ${firstName}` : "Hi there";
+  const companyPhrase = company ? ` at ${company}` : "";
+  const rolePhrase = role ? ` for the ${role} role` : "";
+
+  // Check last interaction in the thread
+  const validInteractions = thread.filter(
+    (int) => !isDeletionMarkerNote(int) && Boolean(int.message_summary?.trim())
+  );
+  const lastInteraction = validInteractions[validInteractions.length - 1];
+  const lastDirection = (lastInteraction?.direction || "").toLowerCase();
+  const lastSummary = (lastInteraction?.message_summary || "").trim();
+
+  const isCasual = instruction && /casual|informal|friendly/i.test(instruction);
+  const isCurious = instruction && /curio|interest|question|challenge/i.test(instruction);
+
+  // Scenario 1: Contact previously sent an inbound message
+  if (lastDirection === "inbound") {
+    if (isCasual) {
+      return `${nameSalutation}, thanks for getting back to me! I would love to chat more about what the team is working on${companyPhrase}. Let me know if you have a few minutes later this week.`;
+    }
+    if (isCurious) {
+      return `${nameSalutation}, thank you for your note. I've been following what you're building${companyPhrase} and would love to hear more about the technical challenges your team is focusing on right now. Do you have 15 minutes to connect?`;
+    }
+    return `${nameSalutation}, thank you for reaching out! I am very interested in learning more about opportunities${companyPhrase}${rolePhrase}. What does your schedule look like for a brief conversation this week?`;
+  }
+
+  // Scenario 2: Thread has prior outbound message(s) without recent reply (Follow-up)
+  if (validInteractions.length > 0) {
+    if (isCasual) {
+      return `${nameSalutation}, hope your week is off to a great start! Just bumping this in case it got buried—would still love to connect whenever you get a moment.`;
+    }
+    return `${nameSalutation}, following up on my previous message. I know things get busy, but I remain very interested in contributing to engineering efforts${companyPhrase}. Would love to find a brief time to connect.`;
+  }
+
+  // Scenario 3: Fresh outbound outreach (no prior thread)
+  if (isCasual) {
+    return `${nameSalutation}, came across your profile and noticed the work your team is doing${companyPhrase}. Would love to connect and stay in touch!`;
+  }
+  return `${nameSalutation}, I noticed your work${companyPhrase} and wanted to reach out. I'm actively exploring new opportunities${rolePhrase} and would love to connect to see if there might be a fit for collaboration.`;
+}
 export function applyRegeneratedProposalText(
   proposal: OutreachProposal,
   newProposedText: string

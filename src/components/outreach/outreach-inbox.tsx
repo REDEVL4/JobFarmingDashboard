@@ -33,7 +33,6 @@ import { cn, formatDateTime, formatRelativeTime } from "@/lib/utils";
 import { createClient } from "@/lib/supabase/client";
 import {
   getInteractionStatus,
-  buildNewProposalPayload,
   buildRegeneratePayload,
   applyRegeneratedProposalText,
   buildOutreachTimeline,
@@ -153,18 +152,8 @@ export function OutreachInbox({
     });
   };
 
-  // Requirement 2: New message action state
-  const [isNewMessageOpen, setIsNewMessageOpen] = useState(false);
-  const [newMessageText, setNewMessageText] = useState("");
-  const [isSavingNewMessage, setIsSavingNewMessage] = useState(false);
-  const [newMessageError, setNewMessageError] = useState<string | null>(null);
-  const newMessageInputRef = useRef<HTMLTextAreaElement | null>(null);
-
-  useEffect(() => {
-    if (isNewMessageOpen && newMessageInputRef.current) {
-      newMessageInputRef.current.focus();
-    }
-  }, [isNewMessageOpen]);
+  // Requirement 2: Bot-driven New message drafting state
+  const [isDraftingNewMessage, setIsDraftingNewMessage] = useState(false);
 
   // Cleanup polling interval on unmount
   useEffect(() => {
@@ -634,49 +623,49 @@ export function OutreachInbox({
     }
   };
 
-  const handleSaveNewMessage = async () => {
-    if (!selectedContact || !newMessageText.trim() || isSavingNewMessage) return;
+  const handleNewMessageDraft = async () => {
+    if (!selectedContact || isDraftingNewMessage || isRewriting || isResolving) return;
 
-    setIsSavingNewMessage(true);
-    setNewMessageError(null);
+    setIsDraftingNewMessage(true);
+    setErrorFeedback(null);
 
     try {
-      const payload = buildNewProposalPayload(selectedContact, newMessageText);
-
-      const res = await fetch("/api/outreach/proposals", {
+      const res = await fetch("/api/outreach/draft", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          action: "create",
-          contact_id: payload.contact_id,
-          proposed_text: payload.proposed_text,
-          channel: payload.channel,
-          action_type: payload.action_type,
+          contact_id: selectedContact.id,
+          contact: selectedContact,
+          thread: timelineInteractions.map((int: OutreachInteraction) => ({
+            direction: int.direction,
+            event_type: int.event_type,
+            message_summary: int.message_summary,
+            event_at: int.event_at || int.created_at,
+          })),
+          instruction: customizeInstruction || undefined,
         }),
       });
 
       const json = await res.json().catch(() => ({}));
       if (!res.ok || !json.data) {
-        throw new Error(json.error || "Failed to save proposal draft");
+        throw new Error(json.error || "Failed to generate message draft with bot");
       }
 
-      const createdProposal: OutreachProposal = json.data;
+      const newProposal: OutreachProposal = json.data;
 
-      setProposals((prev) => [createdProposal, ...prev.filter((p) => p.id !== createdProposal.id)]);
-      setComposerText(createdProposal.proposed_text);
-      savedProposalTextRef.current = createdProposal.proposed_text;
+      setProposals((prev) => [newProposal, ...prev.filter((p) => p.id !== newProposal.id)]);
+      setComposerText(newProposal.proposed_text || "");
+      savedProposalTextRef.current = newProposal.proposed_text || "";
       setJustApproved(false);
-      setIsNewMessageOpen(false);
-      setNewMessageText("");
 
       startTransition(() => {
         router.refresh();
       });
     } catch (err: any) {
-      console.error("Save new message proposal error:", err);
-      setNewMessageError(err.message || "Failed to save new message draft");
+      console.error("Failed to generate bot draft:", err);
+      setErrorFeedback(err?.message || "Failed to generate bot draft");
     } finally {
-      setIsSavingNewMessage(false);
+      setIsDraftingNewMessage(false);
     }
   };
 
@@ -1329,19 +1318,20 @@ export function OutreachInbox({
                     type="button"
                     variant="outline"
                     size="sm"
-                    onClick={() => {
-                      setIsNewMessageOpen(true);
-                      setNewMessageText("");
-                      setNewMessageError(null);
-                    }}
-                    className="h-7 px-2 sm:px-2.5 text-[11px] font-medium gap-1.5 border-border bg-background hover:bg-muted text-foreground transition-colors shrink-0"
-                    title="Draft a fresh outbound message to this contact"
+                    disabled={isDraftingNewMessage || isRewriting || isResolving}
+                    onClick={handleNewMessageDraft}
+                    className="h-7 px-2 sm:px-2.5 text-[11px] font-medium gap-1.5 border-border bg-background hover:bg-muted text-foreground transition-colors shrink-0 disabled:opacity-50"
+                    title="Call bot to draft a fresh message based on conversation history"
                   >
-                    <Plus className="h-3.5 w-3.5 text-primary" />
-                    <span>New message</span>
+                    {isDraftingNewMessage ? (
+                      <RotateCw className="h-3.5 w-3.5 animate-spin text-primary" />
+                    ) : (
+                      <Sparkles className="h-3.5 w-3.5 text-primary" />
+                    )}
+                    <span>{isDraftingNewMessage ? "Drafting…" : "New message"}</span>
                   </Button>
                   <span className="text-[9px] text-muted-foreground hidden 2xl:inline max-w-[200px] truncate">
-                    Draft fresh outbound message
+                    {isDraftingNewMessage ? "Bot drafting message…" : "Bot drafts message from history"}
                   </span>
                 </div>
 
@@ -1575,95 +1565,14 @@ export function OutreachInbox({
 
             {/* Bottom Composer */}
             <div className="p-3 sm:p-4 border-t border-border bg-card/80 space-y-2 shrink-0">
-              {isNewMessageOpen ? (
-                /* New Outbound Message Draft Panel */
-                <div className="space-y-2.5 p-3 rounded-xl border border-primary/40 bg-card/90 shadow-xs">
-                  <div className="flex items-center justify-between text-xs">
-                    <div className="flex items-center gap-2">
-                      <Send className="h-3.5 w-3.5 text-primary" />
-                      <span className="font-bold text-foreground">New Outbound Message</span>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary border border-primary/20 font-semibold uppercase">
-                        Fresh Draft
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className="font-mono text-[10px] text-muted-foreground">
-                        {newMessageText.length} characters
-                      </span>
-                      <button
-                        type="button"
-                        disabled={isSavingNewMessage}
-                        onClick={() => {
-                          setIsNewMessageOpen(false);
-                          setNewMessageText("");
-                          setNewMessageError(null);
-                        }}
-                        className="p-1 rounded text-muted-foreground hover:text-foreground cursor-pointer"
-                        title="Cancel"
-                      >
-                        <X className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
+              {isDraftingNewMessage ? (
+                <div className="space-y-2 p-3 rounded-xl border border-primary/40 bg-card/90 shadow-xs">
+                  <div className="flex items-center gap-2 text-xs font-semibold text-primary">
+                    <RotateCw className="h-3.5 w-3.5 animate-spin" />
+                    <span>Bot is drafting a new message based on conversation history...</span>
                   </div>
-
-                  <textarea
-                    ref={newMessageInputRef}
-                    value={newMessageText}
-                    onChange={(e) => setNewMessageText(e.target.value)}
-                    rows={3}
-                    disabled={isSavingNewMessage}
-                    placeholder="Type a fresh outbound message for review..."
-                    className="w-full resize-y p-2.5 text-xs rounded-lg border border-input bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring transition-all disabled:opacity-70"
-                  />
-
-                  {newMessageError && (
-                    <div className="flex items-center gap-1.5 text-xs text-rose-600 bg-rose-500/10 border border-rose-500/20 p-2 rounded-lg">
-                      <ShieldAlert className="h-3.5 w-3.5 shrink-0" />
-                      <span>{newMessageError}</span>
-                    </div>
-                  )}
-
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-1">
-                    <p className="text-[11px] text-muted-foreground">
-                      Will be saved as an outreach proposal with state <strong>pending for review</strong>.
-                    </p>
-
-                    <div className="flex items-center gap-2 self-end sm:self-auto">
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        disabled={isSavingNewMessage}
-                        onClick={() => {
-                          setIsNewMessageOpen(false);
-                          setNewMessageText("");
-                          setNewMessageError(null);
-                        }}
-                        className="h-7 text-xs font-medium px-2.5 border-border text-muted-foreground hover:text-foreground cursor-pointer"
-                      >
-                        Cancel
-                      </Button>
-
-                      <Button
-                        type="button"
-                        size="sm"
-                        disabled={isSavingNewMessage || !newMessageText.trim()}
-                        onClick={handleSaveNewMessage}
-                        className="h-7 text-xs bg-primary hover:bg-primary/90 text-primary-foreground font-medium gap-1 px-3 shadow-xs cursor-pointer disabled:cursor-not-allowed"
-                      >
-                        {isSavingNewMessage ? (
-                          <>
-                            <RotateCw className="h-3 w-3 animate-spin" />
-                            <span>Saving...</span>
-                          </>
-                        ) : (
-                          <>
-                            <Check className="h-3 w-3" />
-                            <span>Save Draft for Review</span>
-                          </>
-                        )}
-                      </Button>
-                    </div>
+                  <div className="p-3 rounded-lg bg-background/50 border border-input text-xs text-muted-foreground animate-pulse">
+                    Analyzing contact profile, recruiter signals, and prior thread interactions to draft response...
                   </div>
                 </div>
               ) : justApproved ? (
@@ -1701,16 +1610,17 @@ export function OutreachInbox({
                     <div className="flex items-center gap-3">
                       <button
                         type="button"
-                        onClick={() => {
-                          setIsNewMessageOpen(true);
-                          setNewMessageText("");
-                          setNewMessageError(null);
-                        }}
-                        className="text-[10px] text-primary hover:underline flex items-center gap-1 font-semibold cursor-pointer"
-                        title="Start a fresh message instead of replying to this draft"
+                        disabled={isDraftingNewMessage || isRewriting || isResolving}
+                        onClick={handleNewMessageDraft}
+                        className="text-[10px] text-primary hover:underline flex items-center gap-1 font-semibold cursor-pointer disabled:opacity-50"
+                        title="Call bot to draft a fresh message based on conversation history"
                       >
-                        <Plus className="h-2.5 w-2.5" />
-                        <span>New message</span>
+                        {isDraftingNewMessage ? (
+                          <RotateCw className="h-2.5 w-2.5 animate-spin" />
+                        ) : (
+                          <Sparkles className="h-2.5 w-2.5" />
+                        )}
+                        <span>{isDraftingNewMessage ? "Drafting…" : "New message"}</span>
                       </button>
                       <span className="font-mono text-[10px]">
                         {composerText.length} characters
@@ -1855,20 +1765,22 @@ export function OutreachInbox({
                       type="button"
                       size="sm"
                       variant="outline"
-                      onClick={() => {
-                        setIsNewMessageOpen(true);
-                        setNewMessageText("");
-                        setNewMessageError(null);
-                      }}
-                      className="h-6 text-[11px] font-medium gap-1 px-2.5 border-border text-foreground hover:bg-muted"
+                      disabled={isDraftingNewMessage || isRewriting || isResolving}
+                      onClick={handleNewMessageDraft}
+                      className="h-6 text-[11px] font-medium gap-1 px-2.5 border-border text-foreground hover:bg-muted disabled:opacity-50 cursor-pointer"
+                      title="Call bot to draft a fresh message based on conversation history"
                     >
-                      <Plus className="h-3 w-3 text-primary" />
-                      <span>New message</span>
+                      {isDraftingNewMessage ? (
+                        <RotateCw className="h-3 w-3 animate-spin text-primary" />
+                      ) : (
+                        <Sparkles className="h-3 w-3 text-primary" />
+                      )}
+                      <span>{isDraftingNewMessage ? "Drafting…" : "New message"}</span>
                     </Button>
                   </div>
                   <textarea
                     disabled
-                    placeholder="No pending draft. Click 'New message' to draft a fresh outbound message..."
+                    placeholder="No pending draft. Click 'New message' to have the bot draft a message based on conversation history..."
                     rows={2}
                     className="w-full resize-none p-2.5 text-xs bg-muted/40 text-muted-foreground border border-input rounded-lg cursor-not-allowed placeholder:text-muted-foreground/60 focus:outline-none"
                   />
