@@ -1383,95 +1383,139 @@ export function OutreachInbox({
                   const isExpanded = Boolean(expandedInteractions[interaction.id]);
 
                   if (status === "deleted") {
+                    const originalText =
+                      interaction.message_summary ||
+                      (interaction as any).original_text ||
+                      (interaction as any).raw_text ||
+                      (interaction as any).body ||
+                      "(No content)";
+
                     return (
                       <div
                         key={interaction.id}
                         className={cn(
-                          "flex flex-col space-y-1",
+                          "flex flex-col space-y-1.5",
                           isOutbound ? "items-end" : "items-start"
                         )}
                       >
-                        <button
-                          type="button"
-                          onClick={() => toggleInteractionExpanded(interaction.id)}
+                        {/* Collapsed tag row: single tag with timestamp directly next to the tag */}
+                        <div
                           className={cn(
-                            "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium transition-all cursor-pointer border shadow-xs",
-                            isOutbound
-                              ? "bg-rose-500/10 hover:bg-rose-500/20 text-rose-600 dark:text-rose-400 border-rose-500/30"
-                              : "bg-muted/80 hover:bg-muted text-muted-foreground hover:text-foreground border-border/80"
+                            "flex items-center gap-2",
+                            isOutbound ? "justify-end" : "justify-start"
                           )}
-                          title="Click to toggle deleted message text"
                         >
-                          <Trash2 className="h-3 w-3 text-rose-500 shrink-0" />
-                          <span>Message deleted</span>
-                          {isExpanded ? (
-                            <ChevronUp className="h-3 w-3 opacity-60 ml-0.5" />
-                          ) : (
-                            <ChevronDown className="h-3 w-3 opacity-60 ml-0.5" />
+                          {isOutbound && (
+                            <span className="text-[10px] text-muted-foreground font-mono">
+                              {formatDateTime(eventTime)}
+                            </span>
                           )}
-                        </button>
+                          <button
+                            type="button"
+                            onClick={() => toggleInteractionExpanded(interaction.id)}
+                            className={cn(
+                              "inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-medium transition-all cursor-pointer border shadow-xs select-none",
+                              isOutbound
+                                ? "bg-rose-500/10 hover:bg-rose-500/20 text-rose-600 dark:text-rose-400 border-rose-500/30"
+                                : "bg-muted/80 hover:bg-muted text-muted-foreground hover:text-foreground border-border/80"
+                            )}
+                            title={isExpanded ? "Click to collapse" : "Click to view original text"}
+                          >
+                            <Trash2 className="h-3 w-3 text-rose-500 shrink-0" />
+                            <span>Message deleted</span>
+                            {isExpanded ? (
+                              <ChevronUp className="h-3 w-3 opacity-60 ml-0.5" />
+                            ) : (
+                              <ChevronDown className="h-3 w-3 opacity-60 ml-0.5" />
+                            )}
+                          </button>
+                          {!isOutbound && (
+                            <span className="text-[10px] text-muted-foreground font-mono">
+                              {formatDateTime(eventTime)}
+                            </span>
+                          )}
+                        </div>
 
+                        {/* On click of the tag, expand to show the original text */}
                         {isExpanded && (
                           <div
                             className={cn(
-                              "px-4 py-2.5 max-w-[82%] sm:max-w-[75%] text-xs leading-relaxed whitespace-pre-wrap rounded-2xl shadow-xs mt-1 border border-dashed border-rose-500/30 bg-rose-500/5 text-foreground/90",
+                              "px-4 py-2.5 max-w-[82%] sm:max-w-[75%] text-xs leading-relaxed whitespace-pre-wrap rounded-2xl shadow-xs border border-dashed border-rose-500/30 bg-rose-500/5 text-foreground/90",
                               isOutbound ? "rounded-tr-xs" : "rounded-tl-xs"
                             )}
                           >
-                            {interaction.message_summary || "(No content)"}
+                            {originalText}
                           </div>
                         )}
-
-                        <span className="text-[10px] text-muted-foreground font-mono px-1">
-                          {formatDateTime(eventTime)}
-                        </span>
                       </div>
                     );
                   }
 
                   if (status === "edited") {
+                    const originalText =
+                      interaction.message_summary ||
+                      (interaction as any).original_text ||
+                      (interaction as any).raw_text ||
+                      (interaction as any).body ||
+                      "(No content)";
+
                     return (
                       <div
                         key={interaction.id}
                         className={cn(
-                          "flex flex-col space-y-1",
+                          "flex flex-col space-y-1.5",
                           isOutbound ? "items-end" : "items-start"
                         )}
                       >
-                        <button
-                          type="button"
-                          onClick={() => toggleInteractionExpanded(interaction.id)}
+                        {/* Collapsed tag row: single tag with timestamp directly next to the tag */}
+                        <div
                           className={cn(
-                            "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium transition-all cursor-pointer border shadow-xs",
-                            isOutbound
-                              ? "bg-amber-500/10 hover:bg-amber-500/20 text-amber-600 dark:text-amber-400 border-amber-500/30"
-                              : "bg-muted/80 hover:bg-muted text-muted-foreground hover:text-foreground border-border/80"
+                            "flex items-center gap-2",
+                            isOutbound ? "justify-end" : "justify-start"
                           )}
-                          title="Click to toggle edited message text"
                         >
-                          <Pencil className="h-3 w-3 text-amber-500 shrink-0" />
-                          <span>Message edited</span>
-                          {isExpanded ? (
-                            <ChevronUp className="h-3 w-3 opacity-60 ml-0.5" />
-                          ) : (
-                            <ChevronDown className="h-3 w-3 opacity-60 ml-0.5" />
+                          {isOutbound && (
+                            <span className="text-[10px] text-muted-foreground font-mono">
+                              {formatDateTime(eventTime)}
+                            </span>
                           )}
-                        </button>
+                          <button
+                            type="button"
+                            onClick={() => toggleInteractionExpanded(interaction.id)}
+                            className={cn(
+                              "inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-medium transition-all cursor-pointer border shadow-xs select-none",
+                              isOutbound
+                                ? "bg-amber-500/10 hover:bg-amber-500/20 text-amber-600 dark:text-amber-400 border-amber-500/30"
+                                : "bg-muted/80 hover:bg-muted text-muted-foreground hover:text-foreground border-border/80"
+                            )}
+                            title={isExpanded ? "Click to collapse" : "Click to view original text"}
+                          >
+                            <Pencil className="h-3 w-3 text-amber-500 shrink-0" />
+                            <span>Message edited</span>
+                            {isExpanded ? (
+                              <ChevronUp className="h-3 w-3 opacity-60 ml-0.5" />
+                            ) : (
+                              <ChevronDown className="h-3 w-3 opacity-60 ml-0.5" />
+                            )}
+                          </button>
+                          {!isOutbound && (
+                            <span className="text-[10px] text-muted-foreground font-mono">
+                              {formatDateTime(eventTime)}
+                            </span>
+                          )}
+                        </div>
 
+                        {/* On click of the tag, expand to show the original text */}
                         {isExpanded && (
                           <div
                             className={cn(
-                              "px-4 py-2.5 max-w-[82%] sm:max-w-[75%] text-xs leading-relaxed whitespace-pre-wrap rounded-2xl shadow-xs mt-1 border border-amber-500/30 bg-amber-500/5 text-foreground",
+                              "px-4 py-2.5 max-w-[82%] sm:max-w-[75%] text-xs leading-relaxed whitespace-pre-wrap rounded-2xl shadow-xs border border-amber-500/30 bg-amber-500/5 text-foreground",
                               isOutbound ? "rounded-tr-xs" : "rounded-tl-xs"
                             )}
                           >
-                            {interaction.message_summary || "(No content)"}
+                            {originalText}
                           </div>
                         )}
-
-                        <span className="text-[10px] text-muted-foreground font-mono px-1">
-                          {formatDateTime(eventTime)}
-                        </span>
                       </div>
                     );
                   }

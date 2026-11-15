@@ -12,37 +12,73 @@ export function getInteractionStatus(
 
   const anyInt = interaction as any;
 
-  // 1. Deleted conditions
+  // 1. Deleted conditions:
+  // Explicitly check deleted_on_linkedin flag, notes, or any deleted marker
   if (
+    anyInt.deleted_on_linkedin === true ||
+    anyInt.deleted_on_linkedin === "true" ||
+    Boolean(anyInt.deleted_on_linkedin) ||
     anyInt.is_deleted === true ||
     anyInt.deleted === true ||
     Boolean(anyInt.deleted_at) ||
     anyInt.event_type === "message_deleted" ||
     anyInt.event_type === "deleted" ||
-    (typeof anyInt.status === "string" && anyInt.status.toLowerCase() === "deleted") ||
-    (typeof anyInt.notes === "string" && /deleted/i.test(anyInt.notes)) ||
+    anyInt.event_type === "deleted_on_linkedin" ||
+    (typeof anyInt.status === "string" &&
+      (anyInt.status.toLowerCase() === "deleted" ||
+        anyInt.status.toLowerCase() === "deleted_on_linkedin" ||
+        /deleted/i.test(anyInt.status))) ||
+    (typeof anyInt.notes === "string" && (/deleted/i.test(anyInt.notes) || /deleted_on_linkedin/i.test(anyInt.notes))) ||
+    (typeof anyInt.verification === "string" && (/deleted/i.test(anyInt.verification) || /deleted_on_linkedin/i.test(anyInt.verification))) ||
     (typeof anyInt.evidence_source === "string" && /deleted/i.test(anyInt.evidence_source)) ||
     (typeof anyInt.evidence_ref === "string" && /deleted/i.test(anyInt.evidence_ref)) ||
+    (typeof anyInt.metadata === "object" &&
+      anyInt.metadata &&
+      (anyInt.metadata.deleted_on_linkedin === true || Boolean(anyInt.metadata.deleted) || Boolean(anyInt.metadata.is_deleted))) ||
+    (typeof anyInt.payload === "object" &&
+      anyInt.payload &&
+      (anyInt.payload.deleted_on_linkedin === true || Boolean(anyInt.payload.deleted) || Boolean(anyInt.payload.is_deleted))) ||
+    (typeof anyInt.raw === "object" &&
+      anyInt.raw &&
+      (anyInt.raw.deleted_on_linkedin === true || Boolean(anyInt.raw.deleted) || Boolean(anyInt.raw.is_deleted))) ||
     (typeof anyInt.message_summary === "string" &&
-      /^(?:\[?message deleted\]?|this message (?:was|has been) deleted)$/i.test(anyInt.message_summary.trim()))
+      /^(?:\[?message deleted\]?|this message (?:was|has been) deleted|deleted)$/i.test(anyInt.message_summary.trim()))
   ) {
     return "deleted";
   }
 
-  // 2. Edited conditions
+  // 2. Edited conditions:
+  // Explicitly check edited_on_linkedin flag, notes, or any edited marker
   if (
+    anyInt.edited_on_linkedin === true ||
+    anyInt.edited_on_linkedin === "true" ||
+    Boolean(anyInt.edited_on_linkedin) ||
     anyInt.is_edited === true ||
     anyInt.edited === true ||
     Boolean(anyInt.edited_at) ||
     anyInt.event_type === "message_edited" ||
     anyInt.event_type === "edited" ||
-    (typeof anyInt.status === "string" && anyInt.status.toLowerCase() === "edited") ||
-    (typeof anyInt.notes === "string" && /edited/i.test(anyInt.notes)) ||
+    anyInt.event_type === "edited_on_linkedin" ||
+    (typeof anyInt.status === "string" &&
+      (anyInt.status.toLowerCase() === "edited" ||
+        anyInt.status.toLowerCase() === "edited_on_linkedin" ||
+        /edited/i.test(anyInt.status))) ||
+    (typeof anyInt.notes === "string" && (/edited/i.test(anyInt.notes) || /edited_on_linkedin/i.test(anyInt.notes))) ||
+    (typeof anyInt.verification === "string" && (/edited/i.test(anyInt.verification) || /edited_on_linkedin/i.test(anyInt.verification))) ||
     (typeof anyInt.evidence_source === "string" && /edited/i.test(anyInt.evidence_source)) ||
     (typeof anyInt.evidence_ref === "string" && /edited/i.test(anyInt.evidence_ref)) ||
+    (typeof anyInt.metadata === "object" &&
+      anyInt.metadata &&
+      (anyInt.metadata.edited_on_linkedin === true || Boolean(anyInt.metadata.edited) || Boolean(anyInt.metadata.is_edited))) ||
+    (typeof anyInt.payload === "object" &&
+      anyInt.payload &&
+      (anyInt.payload.edited_on_linkedin === true || Boolean(anyInt.payload.edited) || Boolean(anyInt.payload.is_edited))) ||
+    (typeof anyInt.raw === "object" &&
+      anyInt.raw &&
+      (anyInt.raw.edited_on_linkedin === true || Boolean(anyInt.raw.edited) || Boolean(anyInt.raw.is_edited))) ||
     (typeof anyInt.message_summary === "string" &&
       (/(?:\(edited\)|\[edited\])$/i.test(anyInt.message_summary.trim()) ||
-        /^(?:\[?message edited\]?|\(edited\))$/i.test(anyInt.message_summary.trim())))
+        /^(?:\[?message edited\]?|\(edited\)|edited)$/i.test(anyInt.message_summary.trim())))
   ) {
     return "edited";
   }
