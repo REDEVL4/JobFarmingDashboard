@@ -2,7 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 // Import helper once created, or test specification first
-import { getInteractionStatus } from "../../src/lib/outreach-helpers.ts";
+import {
+  getInteractionStatus,
+  isDeletionMarkerNote,
+  isDeletedOnLinkedInProposal,
+  matchProposalToInteraction,
+  buildOutreachTimeline,
+} from "../../src/lib/outreach-helpers.ts";
 
 test("Interaction Status: detects deleted message by is_deleted or deleted flags", () => {
   assert.equal(getInteractionStatus({ is_deleted: true }), "deleted");
@@ -67,4 +73,123 @@ test("Interaction Status: returns null for standard unedited/undeleted messages"
   assert.equal(getInteractionStatus({ message_summary: "Hi, thanks for reaching out!" }), null);
   assert.equal(getInteractionStatus({ event_type: "message_received" }), null);
   assert.equal(getInteractionStatus(null), null);
+});
+
+test("Deletion Note: identifies marker notes that should be hidden", () => {
+  assert.equal(
+    isDeletionMarkerNote({ event_type: "note", message_summary: "deleted_on_linkedin" }),
+    true
+  );
+  assert.equal(
+    isDeletionMarkerNote({ external_key: "deleted|urn:li:msg:123" }),
+    true
+  );
+  assert.equal(
+    isDeletionMarkerNote({ event_type: "note", notes: "marked deleted_on_linkedin" }),
+    true
+  );
+  assert.equal(
+    isDeletionMarkerNote({ event_type: "note", message_summary: "Candidate interested in remote roles" }),
+    false
+  );
+  assert.equal(
+    isDeletionMarkerNote({ event_type: "message_sent", message_summary: "Hi Sarah" }),
+    false
+  );
+  assert.equal(isDeletionMarkerNote(null), false);
+});
+
+test("Deleted Proposal: identifies proposals where state = sent and error = deleted_on_linkedin", () => {
+  assert.equal(
+    isDeletedOnLinkedInProposal({ state: "sent", error: "deleted_on_linkedin" }),
+    true
+  );
+  assert.equal(
+    isDeletedOnLinkedInProposal({ state: "sent", error: null }),
+    false
+  );
+  assert.equal(
+    isDeletedOnLinkedInProposal({ state: "pending_approval", error: "deleted_on_linkedin" }),
+    false
+  );
+  assert.equal(isDeletedOnLinkedInProposal(null), false);
+});
+
+test("Timeline Builder: hides deletion note rows and marks deleted message in original slot without adding new rows", () => {
+  const contactId = "contact_001";
+  const sentTime = "2026-11-15T10:00:00Z";
+
+  const interactions = [
+    {
+      id: "int_inbound_1",
+      contact_id: contactId,
+      event_type: "message_received",
+      direction: "inbound",
+      message_summary: "Hello! Are you open to discussing opportunities?",
+      event_at: "2026-11-15T09:30:00Z",
+    },
+    {
+      id: "int_sent_2",
+      contact_id: contactId,
+      event_type: "message_sent",
+      direction: "outbound",
+      message_summary: "Hi! Yes, I would love to connect about the role.",
+      event_at: sentTime,
+    },
+    {
+      id: "int_note_3",
+      contact_id: contactId,
+      event_type: "note",
+      message_summary: "deleted_on_linkedin",
+      external_key: "deleted|int_sent_2",
+      event_at: "2026-11-15T10:15:00Z",
+    },
+    {
+      id: "int_inbound_4",
+      contact_id: contactId,
+      event_type: "message_received",
+      direction: "inbound",
+      message_summary: "Sounds great, let me send over the spec.",
+      event_at: "2026-11-15T11:00:00Z",
+    },
+  ];
+
+  const proposals = [
+    {
+      id: "prop_sent_2",
+      contact_id: contactId,
+      state: "sent",
+      error: "deleted_on_linkedin",
+      proposed_text: "Hi! Yes, I would love to connect about the role.",
+      sent_at: sentTime,
+    },
+  ];
+
+  const timeline = buildOutreachTimeline(interactions, proposals);
+
+  // 1. Deletion note (int_note_3) is hidden: total length is 3, not 4 or 5
+  assert.equal(timeline.length, 3);
+  assert.equal(timeline.some((item) => item.id === "int_note_3"), false);
+
+  // 2. Sent message (int_sent_2) remains in its exact slot (index 1)
+  assert.equal(timeline[1].id, "int_sent_2");
+  assert.equal(timeline[1].deleted_on_linkedin, true);
+  assert.equal(timeline[1].is_deleted, true);
+  assert.equal(timeline[1].event_at, sentTime);
+  assert.equal(
+    timeline[1].original_text,
+    "Hi! Yes, I would love to connect about the role."
+  );
+
+  // Status helper recognizes it as deleted
+  assert.equal(getInteractionStatus(timeline[1]), "deleted");
+
+  // 3. Other messages remain completely unchanged
+  assert.equal(timeline[0].id, "int_inbound_1");
+  assert.equal(timeline[0].message_summary, "Hello! Are you open to discussing opportunities?");
+  assert.equal(getInteractionStatus(timeline[0]), null);
+
+  assert.equal(timeline[2].id, "int_inbound_4");
+  assert.equal(timeline[2].message_summary, "Sounds great, let me send over the spec.");
+  assert.equal(getInteractionStatus(timeline[2]), null);
 });

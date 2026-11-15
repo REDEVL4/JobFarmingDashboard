@@ -185,3 +185,221 @@ export function applyRegeneratedProposalText(
     updated_at: new Date().toISOString(),
   };
 }
+
+/**
+ * Checks whether an interaction is a deletion marker note that should NOT be rendered in the timeline.
+ * - event_type = 'note' and message_summary = 'deleted_on_linkedin'
+ * - external_key starts with 'deleted|'
+ */
+export function isDeletionMarkerNote(
+  interaction: Partial<OutreachInteraction> | Record<string, any> | null | undefined
+): boolean {
+  if (!interaction) return false;
+  const anyInt = interaction as any;
+  const eventType = (anyInt.event_type || "").toLowerCase().trim();
+  const summary = (anyInt.message_summary || "").toLowerCase().trim();
+  const extKey = typeof anyInt.external_key === "string" ? anyInt.external_key.trim() : "";
+
+  if (extKey.startsWith("deleted|") || extKey.toLowerCase().startsWith("deleted|")) {
+    return true;
+  }
+
+  if (eventType === "note") {
+    if (summary === "deleted_on_linkedin" || summary.includes("deleted_on_linkedin")) {
+      return true;
+    }
+    if (typeof anyInt.notes === "string" && /deleted_on_linkedin/i.test(anyInt.notes)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Checks whether a proposal represents a sent message that was later marked deleted on LinkedIn:
+ * state = 'sent' and error = 'deleted_on_linkedin'
+ */
+export function isDeletedOnLinkedInProposal(
+  proposal: Partial<OutreachProposal> | Record<string, any> | null | undefined
+): boolean {
+  if (!proposal) return false;
+  const anyP = proposal as any;
+  const state = (anyP.state || "").toLowerCase().trim();
+  const error = (anyP.error || "").toLowerCase().trim();
+  return state === "sent" && (error === "deleted_on_linkedin" || error.includes("deleted_on_linkedin"));
+}
+
+/**
+ * Matches a deleted proposal to its message_sent interaction row:
+ * 1. By action_id (if available)
+ * 2. By contact_id + sent time + text
+ */
+export function matchProposalToInteraction(
+  proposal: Partial<OutreachProposal> | Record<string, any>,
+  interactions: OutreachInteraction[]
+): OutreachInteraction | null {
+  const pContactId = proposal.contact_id;
+  const pActionId = (proposal as any).action_id || proposal.id;
+  const pText = (proposal.approved_text || proposal.proposed_text || "").trim().toLowerCase();
+  const pTimeStr = proposal.sent_at || proposal.updated_at || proposal.created_at;
+  const pTime = pTimeStr ? new Date(pTimeStr).getTime() : null;
+
+  // 1. Direct match by action_id if available
+  if (pActionId) {
+    const directMatch = interactions.find(
+      (int) => int.action_id && (int.action_id === pActionId || int.action_id === proposal.id)
+    );
+    if (directMatch) return directMatch;
+  }
+
+  // 2. Filter candidates by contact_id and outbound direction / message_sent event
+  const candidates = interactions.filter((int) => {
+    if (pContactId && int.contact_id && int.contact_id !== pContactId) return false;
+    const dir = (int.direction || "").toLowerCase();
+    const evt = (int.event_type || "").toLowerCase();
+    return dir === "outbound" || evt === "message_sent" || evt.includes("sent") || evt === "message";
+  });
+
+  const pool =
+    candidates.length > 0
+      ? candidates
+      : interactions.filter((int) => !pContactId || int.contact_id === pContactId);
+  if (pool.length === 0) return null;
+
+  // Score candidates based on text match and time proximity
+  let bestMatch: OutreachInteraction | null = null;
+  let bestScore = -1;
+  let smallestTimeDiff = Infinity;
+
+  for (const int of pool) {
+    const iText = (int.message_summary || (int as any).text || "").trim().toLowerCase();
+    const iTimeStr = int.event_at || int.created_at;
+    const iTime = iTimeStr ? new Date(iTimeStr).getTime() : null;
+
+    let textScore = 0;
+    if (pText && iText) {
+      if (pText === iText) {
+        textScore = 100;
+      } else if (pText.includes(iText) || iText.includes(pText)) {
+        textScore = 70;
+      } else {
+        const pWords = pText.split(/\s+/).filter(Boolean);
+        const iWords = iText.split(/\s+/).filter(Boolean);
+        const common = pWords.filter((w: string) => iWords.includes(w)).length;
+        if (pWords.length > 0 && common / pWords.length > 0.6) {
+          textScore = 50;
+        }
+      }
+    }
+
+    let timeDiff = Infinity;
+    let timeScore = 0;
+    if (pTime !== null && iTime !== null && !isNaN(pTime) && !isNaN(iTime)) {
+      timeDiff = Math.abs(pTime - iTime);
+      if (timeDiff <= 60 * 1000) {
+        // Within 1 minute
+        timeScore = 50;
+      } else if (timeDiff <= 3600 * 1000) {
+        // Within 1 hour
+        timeScore = 30;
+      } else if (timeDiff <= 24 * 3600 * 1000) {
+        // Within 24 hours
+        timeScore = 15;
+      }
+    }
+
+    const totalScore = textScore + timeScore;
+    if (totalScore > bestScore || (totalScore === bestScore && timeDiff < smallestTimeDiff)) {
+      bestScore = totalScore;
+      smallestTimeDiff = timeDiff;
+      bestMatch = int;
+    }
+  }
+
+  // Require text match or close time correlation
+  if (bestScore >= 50) {
+    return bestMatch;
+  }
+
+  if (pool.length === 1 && (bestScore > 0 || smallestTimeDiff <= 300 * 1000)) {
+    return pool[0];
+  }
+
+  return null;
+}
+
+/**
+ * Builds the timeline for display in the LinkedIn CRM message list:
+ * 1. Hides deletion note rows (event_type = 'note' & message_summary = 'deleted_on_linkedin', or external_key starts with 'deleted|').
+ * 2. Matches proposals where state = 'sent' & error = 'deleted_on_linkedin' to their original message_sent row
+ *    by contact_id + sent time + text (or by action_id).
+ * 3. In that message's existing timeline position: hides original text, shows collapsed "Message deleted" tag with
+ *    the original timestamp, expanding on click.
+ * 4. Leaves all other messages unchanged without adding new rows.
+ */
+export function buildOutreachTimeline(
+  interactions: OutreachInteraction[],
+  proposals: OutreachProposal[] = []
+): OutreachInteraction[] {
+  if (!interactions || interactions.length === 0) return [];
+
+  // Step 1: Identify deletion marker notes and collect any explicit targets
+  const deletionNotes = interactions.filter(isDeletionMarkerNote);
+  const deletedIdsFromNotes = new Set<string>();
+  for (const note of deletionNotes) {
+    if (typeof note.external_key === "string" && note.external_key.startsWith("deleted|")) {
+      const targetId = note.external_key.slice("deleted|".length);
+      if (targetId) deletedIdsFromNotes.add(targetId);
+    }
+    if (typeof (note as any).target_interaction_id === "string") {
+      deletedIdsFromNotes.add((note as any).target_interaction_id);
+    }
+  }
+
+  // Step 2: Hide deletion note rows from the visible timeline
+  const visibleInteractions = interactions.filter((int) => !isDeletionMarkerNote(int));
+
+  // Step 3: Find proposals where state = 'sent' and error = 'deleted_on_linkedin'
+  const deletedProposals = (proposals || []).filter(isDeletedOnLinkedInProposal);
+
+  // Map each deleted proposal to a matching interaction
+  const matchedDeletedInteractionIds = new Set<string>();
+  const proposalOriginalTexts = new Map<string, string>();
+
+  for (const prop of deletedProposals) {
+    const availablePool = visibleInteractions.filter(
+      (int) => !matchedDeletedInteractionIds.has(int.id)
+    );
+    const matched = matchProposalToInteraction(prop, availablePool);
+    if (matched) {
+      matchedDeletedInteractionIds.add(matched.id);
+      const text = prop.approved_text || prop.proposed_text;
+      if (text) {
+        proposalOriginalTexts.set(matched.id, text);
+      }
+    }
+  }
+
+  // Step 4: Map visible interactions, updating matched messages in their existing slots
+  return visibleInteractions.map((int) => {
+    const isMatchedByProposal = matchedDeletedInteractionIds.has(int.id);
+    const isMatchedByNote = deletedIdsFromNotes.has(int.id);
+
+    if (isMatchedByProposal || isMatchedByNote) {
+      const origText =
+        int.message_summary && int.message_summary.trim() !== "deleted_on_linkedin"
+          ? int.message_summary
+          : proposalOriginalTexts.get(int.id) || int.message_summary || "(No content)";
+
+      return {
+        ...int,
+        deleted_on_linkedin: true,
+        is_deleted: true,
+        original_text: origText,
+      };
+    }
+
+    return int;
+  });
+}

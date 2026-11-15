@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useTransition } from "react";
+import React, { useState, useEffect, useRef, useTransition, useMemo } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -36,6 +36,7 @@ import {
   buildNewProposalPayload,
   buildRegeneratePayload,
   applyRegeneratedProposalText,
+  buildOutreachTimeline,
 } from "@/lib/outreach-helpers";
 import type { DbOutreachContact } from "@/types/database";
 import type {
@@ -87,6 +88,11 @@ export function OutreachInbox({
   const [searchQuery, setSearchQuery] = useState("");
   const [proposals, setProposals] = useState<OutreachProposal[]>(initialProposals);
   const [interactions, setInteractions] = useState<OutreachInteraction[]>(initialInteractions);
+
+  // Timeline with deletion marker notes hidden and deleted proposals mapped to original slot
+  const timelineInteractions = useMemo(() => {
+    return buildOutreachTimeline(interactions, proposals);
+  }, [interactions, proposals]);
 
   // Outreach mode state ("review" | "auto")
   const [outreachMode, setOutreachMode] = useState<"review" | "auto">(initialOutreachMode);
@@ -1370,7 +1376,7 @@ export function OutreachInbox({
 
             {/* Scrollable Message Thread */}
             <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4">
-              {interactions.length === 0 ? (
+              {timelineInteractions.length === 0 ? (
                 <div className="h-full flex flex-col items-center justify-center p-8 text-center text-muted-foreground space-y-1">
                   <MessageSquare className="h-8 w-8 opacity-30 mb-1" />
                   <p className="text-sm font-semibold text-foreground">No messages yet.</p>
@@ -1379,7 +1385,7 @@ export function OutreachInbox({
                   </p>
                 </div>
               ) : (
-                interactions.map((interaction) => {
+                timelineInteractions.map((interaction: OutreachInteraction) => {
                   const isOutbound = (interaction.direction || "").toLowerCase() === "outbound";
                   const eventTime = interaction.event_at || interaction.created_at;
                   const status = getInteractionStatus(interaction);
