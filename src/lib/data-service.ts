@@ -1133,22 +1133,38 @@ export async function fetchContactOutreachThread(
     };
 
     // 2. Fetch interactions for contact, ordered by event_at ASC
-    const interactionsRes = await auth.client
+    let interactionsRes = await auth.client
       .from("jf_outreach_interactions")
       .select("*")
       .eq("contact_id", contactId)
       .order("event_at", { ascending: true, nullsFirst: false })
       .order("created_at", { ascending: true });
 
+    if (interactionsRes.error && interactionsRes.error.code === "42P01") {
+      interactionsRes = await auth.client
+        .from("outreach_interactions")
+        .select("*")
+        .eq("contact_id", contactId)
+        .order("event_at", { ascending: true, nullsFirst: false })
+        .order("created_at", { ascending: true });
+    }
+
     const interactions: OutreachInteraction[] = (interactionsRes.data || []) as OutreachInteraction[];
 
-    // 3. Fetch proposals for contact where state in ('pending_approval', 'approved_for_send')
-    const proposalsRes = await auth.client
+    // 3. Fetch proposals for contact (including pending drafts and sent proposals with deletion markers)
+    let proposalsRes = await auth.client
       .from("jf_outreach_proposals")
       .select("*")
       .eq("contact_id", contactId)
-      .in("state", ["pending_approval", "approved_for_send"])
       .order("created_at", { ascending: true });
+
+    if (proposalsRes.error && proposalsRes.error.code === "42P01") {
+      proposalsRes = await auth.client
+        .from("outreach_proposals")
+        .select("*")
+        .eq("contact_id", contactId)
+        .order("created_at", { ascending: true });
+    }
 
     const proposals: OutreachProposal[] = (proposalsRes.data || []) as OutreachProposal[];
 

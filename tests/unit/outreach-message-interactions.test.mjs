@@ -329,3 +329,104 @@ test("Contextual Draft Generator: drafts fresh outbound outreach when thread is 
   assert.match(freshDraft, /Anthropic/);
   assert.match(freshDraft, /Full Stack Engineer/);
 });
+
+test("Harshith Nerella Timeline: 3:29 PM and 4:25 PM sent messages become collapsed tags in their original slots, notes hidden", () => {
+  const contactId = "7a5e91ed-59b9-40b3-b5b6-ef67ddeb03f4"; // Harshith Nerella
+
+  // Exact 5 interactions from DB
+  const interactions = [
+    {
+      id: "617ef132-6941-4d10-8389-67134f02773a",
+      contact_id: contactId,
+      event_type: "message_sent",
+      direction: "outbound",
+      message_summary:
+        "Hey Harshith, hope your week's going well! Noticed your work in tech and wanted to reach out. Are you exploring new opportunities right now, or open to staying in touch?",
+      event_at: "2026-11-14T21:29:00+00:00", // 3:29 PM CST
+    },
+    {
+      id: "875255e6-note-1",
+      contact_id: contactId,
+      event_type: "note",
+      message_summary: "deleted_on_linkedin",
+      external_key: "deleted|fcd42856-fb73-4ca3-9fa3-476cf7aad36f",
+      event_at: "2026-11-14T21:30:00+00:00",
+    },
+    {
+      id: "819c0fa9-a867-4609-a380-91ec6cfaae1f",
+      contact_id: contactId,
+      event_type: "message_sent",
+      direction: "outbound",
+      message_summary:
+        "Following up on my previous note—would love to connect whenever you have a moment!",
+      event_at: "2026-11-14T22:25:00+00:00", // 4:25 PM CST
+    },
+    {
+      id: "d7a63962-note-2",
+      contact_id: contactId,
+      event_type: "note",
+      message_summary: "deleted_on_linkedin",
+      external_key: "deleted|6629e4c4-de18-4897-86f4-c71492c6c3fc",
+      event_at: "2026-11-14T22:26:00+00:00",
+    },
+    {
+      id: "int_third_message",
+      contact_id: contactId,
+      event_type: "message_sent",
+      direction: "outbound",
+      message_summary: "Third active message from candidate/owner",
+      event_at: "2026-11-14T23:14:00+00:00", // 5:14 PM CST
+    },
+  ];
+
+  // Exact 2 proposals from DB
+  const proposals = [
+    {
+      id: "fcd42856-fb73-4ca3-9fa3-476cf7aad36f",
+      contact_id: contactId,
+      state: "sent",
+      error: "deleted_on_linkedin",
+      sent_at: "2026-11-14T21:29:00+00:00",
+      proposed_text:
+        "Hey Harshith, hope your week's going well! Noticed your work in tech and wanted to reach out. Are you exploring new opportunities right now, or open to staying in touch?",
+    },
+    {
+      id: "6629e4c4-de18-4897-86f4-c71492c6c3fc",
+      contact_id: contactId,
+      state: "sent",
+      error: "deleted_on_linkedin",
+      sent_at: "2026-11-14T22:25:00+00:00",
+      proposed_text:
+        "Following up on my previous note—would love to connect whenever you have a moment!",
+    },
+  ];
+
+  const timeline = buildOutreachTimeline(interactions, proposals);
+
+  // 1. Deletion notes are hidden -> only 3 visible rows
+  assert.equal(timeline.length, 3);
+  assert.equal(timeline.some((item) => item.event_type === "note"), false);
+
+  // 2. Slot 0 (3:29 PM) is marked deleted with original timestamp and text
+  assert.equal(timeline[0].id, "617ef132-6941-4d10-8389-67134f02773a");
+  assert.equal(timeline[0].event_at, "2026-11-14T21:29:00+00:00");
+  assert.equal(getInteractionStatus(timeline[0]), "deleted");
+  assert.equal(
+    timeline[0].original_text,
+    "Hey Harshith, hope your week's going well! Noticed your work in tech and wanted to reach out. Are you exploring new opportunities right now, or open to staying in touch?"
+  );
+
+  // 3. Slot 1 (4:25 PM) is marked deleted with original timestamp and text
+  assert.equal(timeline[1].id, "819c0fa9-a867-4609-a380-91ec6cfaae1f");
+  assert.equal(timeline[1].event_at, "2026-11-14T22:25:00+00:00");
+  assert.equal(getInteractionStatus(timeline[1]), "deleted");
+  assert.equal(
+    timeline[1].original_text,
+    "Following up on my previous note—would love to connect whenever you have a moment!"
+  );
+
+  // 4. Slot 2 (5:14 PM) remains normal message
+  assert.equal(timeline[2].id, "int_third_message");
+  assert.equal(getInteractionStatus(timeline[2]), null);
+});
+

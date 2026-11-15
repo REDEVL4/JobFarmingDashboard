@@ -1456,8 +1456,10 @@ export function OutreachInbox({
 
                   if (status === "deleted") {
                     const originalText =
-                      interaction.message_summary ||
                       (interaction as any).original_text ||
+                      (interaction.message_summary && interaction.message_summary.trim() !== "deleted_on_linkedin"
+                        ? interaction.message_summary
+                        : null) ||
                       (interaction as any).raw_text ||
                       (interaction as any).body ||
                       "(No content)";

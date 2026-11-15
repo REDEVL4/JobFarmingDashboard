@@ -417,7 +417,10 @@ export function buildOutreachTimeline(
   const visibleInteractions = interactions.filter((int) => !isDeletionMarkerNote(int));
 
   // Step 3: Find proposals where state = 'sent' and error = 'deleted_on_linkedin'
-  const deletedProposals = (proposals || []).filter(isDeletedOnLinkedInProposal);
+  // (Also include any proposal whose id was referenced by a deleted| note)
+  const deletedProposals = (proposals || []).filter(
+    (p) => isDeletedOnLinkedInProposal(p) || (p.id && deletedIdsFromNotes.has(p.id))
+  );
 
   // Map each deleted proposal to a matching interaction
   const matchedDeletedInteractionIds = new Set<string>();
@@ -444,9 +447,10 @@ export function buildOutreachTimeline(
 
     if (isMatchedByProposal || isMatchedByNote) {
       const origText =
-        int.message_summary && int.message_summary.trim() !== "deleted_on_linkedin"
+        proposalOriginalTexts.get(int.id) ||
+        (int.message_summary && int.message_summary.trim() !== "deleted_on_linkedin"
           ? int.message_summary
-          : proposalOriginalTexts.get(int.id) || int.message_summary || "(No content)";
+          : (int as any).original_text || int.message_summary || "(No content)");
 
       return {
         ...int,

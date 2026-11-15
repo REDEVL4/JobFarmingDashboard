@@ -155,20 +155,44 @@ export async function GET(req: NextRequest) {
 
     const { searchParams } = new URL(req.url);
     const id = searchParams.get("id");
+    const contactId = searchParams.get("contact_id");
 
-    if (!id) {
+    if (!id && !contactId) {
       return NextResponse.json(
-        { error: "Bad Request: id parameter is required." },
+        { error: "Bad Request: id or contact_id parameter is required." },
         { status: 400 }
       );
     }
 
-    const result = await fetchOutreachProposalById(id);
-    if (!result.data && result.error) {
-      return NextResponse.json({ error: result.error }, { status: 500 });
+    if (id) {
+      const result = await fetchOutreachProposalById(id);
+      if (!result.data && result.error) {
+        return NextResponse.json({ error: result.error }, { status: 500 });
+      }
+      return NextResponse.json({ success: true, data: result.data });
     }
 
-    return NextResponse.json({ success: true, data: result.data });
+    if (contactId) {
+      let proposalsRes = await auth.client
+        .from("jf_outreach_proposals")
+        .select("*")
+        .eq("contact_id", contactId)
+        .order("created_at", { ascending: true });
+
+      if (proposalsRes.error && proposalsRes.error.code === "42P01") {
+        proposalsRes = await auth.client
+          .from("outreach_proposals")
+          .select("*")
+          .eq("contact_id", contactId)
+          .order("created_at", { ascending: true });
+      }
+
+      if (proposalsRes.error) {
+        return NextResponse.json({ error: proposalsRes.error.message }, { status: 500 });
+      }
+
+      return NextResponse.json({ success: true, data: proposalsRes.data || [] });
+    }
   } catch (err: any) {
     console.error("[api/outreach/proposals GET] Error:", err);
     return NextResponse.json(
