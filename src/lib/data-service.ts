@@ -957,26 +957,9 @@ export async function createOutreachProposal(params: {
       };
     }
 
-    // 3. Fallback: synthesize local pending proposal record so UI review flow functions reliably
-    const simulatedProposal: OutreachProposal = {
-      id: crypto.randomUUID(),
-      owner_id: auth.user.id,
-      contact_id,
-      action_type,
-      channel,
-      target_name: contact?.full_name || null,
-      target_title: contact?.professional_title || null,
-      target_company: contact?.company || null,
-      linkedin_url: contact?.linkedin_url || null,
-      proposed_text,
-      state: "pending_approval",
-      created_at: now,
-      updated_at: now,
-    };
-
     return {
-      success: true,
-      data: simulatedProposal,
+      success: false,
+      error: insertRes.error?.message || "Failed to insert outreach proposal into database.",
     };
   } catch (err: any) {
     console.error("[createOutreachProposal] Exception:", err);

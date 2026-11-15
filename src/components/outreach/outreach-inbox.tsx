@@ -681,15 +681,27 @@ export function OutreachInbox({
         }),
       });
 
-      const draftJson = await draftRes.json().catch(() => ({}));
-      if (!draftRes.ok || !draftJson.data) {
-        throw new Error(draftJson.error || "Bot failed to fill in draft text");
+      // If the call returns 400, 404, or 409, show the error and keep the empty pending proposal so the owner can retry
+      if (!draftRes.ok) {
+        const draftErr = await draftRes.json().catch(() => ({}));
+        const statusMsg =
+          draftRes.status === 404
+            ? "Proposal not found (404). Please click Regenerate to retry."
+            : draftRes.status === 409
+            ? "Proposal is not pending approval (409)."
+            : draftRes.status === 400
+            ? "Bad Request (400): Missing proposal id."
+            : draftErr.error || `Bot failed to fill in draft text (${draftRes.status})`;
+        setErrorFeedback(statusMsg);
+        // Keep the empty pending proposal in composer so owner can retry via Regenerate
+        return;
       }
 
+      const draftJson = await draftRes.json().catch(() => ({}));
       const updatedProposal: OutreachProposal = draftJson.data;
-      const finalText = updatedProposal.proposed_text || "";
+      const finalText = updatedProposal?.proposed_text || "";
 
-      // 3. Show the resulting draft in the composer with Approve, Reject, and Regenerate
+      // 3. Show the returned draft in the composer with Approve, Reject, and Regenerate
       setProposals((prev) =>
         prev.map((p) =>
           p.id === createdProposal!.id
@@ -729,7 +741,7 @@ export function OutreachInbox({
     }
 
     const proposalId = proposal.id;
-    // Rule: Do not call regenerate without a proposal id
+    // Rule: Do not call regenerate without a real, existing proposal id
     if (!proposalId) return;
 
     setIsRewriting(true);
@@ -772,43 +784,17 @@ export function OutreachInbox({
       if (!res.ok) {
         const errJson = await res.json().catch(() => null);
         console.warn("[outreach-regenerate] trigger returned status:", res.status, errJson);
-        // Fallback to /api/outreach/draft to guarantee retry succeeds
-        const draftFallbackRes = await fetch("/api/outreach/draft", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            proposal_id: proposalId,
-            contact_id: selectedContact?.id,
-            contact: selectedContact,
-            thread: timelineInteractions.map((int: OutreachInteraction) => ({
-              direction: int.direction,
-              event_type: int.event_type,
-              message_summary: int.message_summary,
-              event_at: int.event_at || int.created_at,
-            })),
-            instruction: customizeInstruction || undefined,
-          }),
-        });
-
-        if (draftFallbackRes.ok) {
-          const draftFallbackJson = await draftFallbackRes.json().catch(() => null);
-          const fallbackText = draftFallbackJson?.data?.proposed_text;
-          if (fallbackText) {
-            setComposerText(fallbackText);
-            savedProposalTextRef.current = fallbackText;
-            setProposals((prev) =>
-              prev.map((p) => (p.id === proposalId ? applyRegeneratedProposalText(p, fallbackText) : p))
-            );
-            setIsRewriting(false);
-            return;
-          }
-        }
-
-        if (res.status === 401 || res.status === 403 || res.status === 404) {
-          setErrorFeedback(errJson?.error || "Failed to trigger rewrite");
-          setIsRewriting(false);
-          return;
-        }
+        const statusMsg =
+          res.status === 404
+            ? "Proposal not found (404). Please retry."
+            : res.status === 409
+            ? "Proposal is not pending approval (409)."
+            : res.status === 400
+            ? "Bad Request (400): Missing proposal id."
+            : errJson?.error || `Regenerate failed (${res.status})`;
+        setErrorFeedback(statusMsg);
+        setIsRewriting(false);
+        return;
       } else {
         try {
           const resJson = await res.json();

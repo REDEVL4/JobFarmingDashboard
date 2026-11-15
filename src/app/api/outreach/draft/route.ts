@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedOwner } from "@/lib/supabase/server";
 import { updateOutreachProposalText } from "@/lib/data-service";
-import { generateContextualDraft } from "@/lib/outreach-helpers";
 
 const OUTREACH_REGENERATE_URL =
   process.env.NEXT_PUBLIC_SUPABASE_URL
@@ -40,88 +39,105 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json().catch(() => ({}));
-    const { proposal_id, contact_id, contact, thread = [], instruction } = body;
+    const { proposal_id, instruction } = body;
 
-    // Strict rule: Do not call regenerate without a proposal id
-    if (!proposal_id) {
+    // Strict rule: Do not call regenerate without a real, existing proposal id
+    if (!proposal_id || typeof proposal_id !== "string" || !proposal_id.trim()) {
       return NextResponse.json(
         { error: "Bad Request: proposal_id is required." },
         { status: 400 }
       );
     }
 
+    // 3. Call bot regenerate endpoint with real proposal_id
+    const supabaseToken =
+      process.env.SUPABASE_SERVICE_ROLE_KEY ||
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+      "";
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (supabaseToken) {
+      headers["Authorization"] = `Bearer ${supabaseToken}`;
+    }
+
+    const botRes = await fetch(OUTREACH_REGENERATE_URL, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        proposal_id: proposal_id.trim(),
+        instruction: (instruction || "regenerate, more natural, show curiosity").slice(0, 500),
+      }),
+    });
+
+    // If the call returns 400, 404, or 409, pass through the error status
+    if (!botRes.ok) {
+      const botErr = await botRes.json().catch(() => ({}));
+      const statusCode = [400, 404, 409].includes(botRes.status) ? botRes.status : 502;
+      return NextResponse.json(
+        {
+          error: botErr.error || `Bot regenerate call failed with status ${botRes.status}`,
+          detail: botErr.detail || null,
+        },
+        { status: statusCode }
+      );
+    }
+
+    const botJson = await botRes.json().catch(() => null);
     let draftText: string | null = null;
 
-    // 3. Call bot regenerate endpoint with proposal_id and the full prior thread
-    try {
-      const supabaseToken = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-      };
-      if (supabaseToken) {
-        headers["Authorization"] = `Bearer ${supabaseToken}`;
-      }
-
-      const botRes = await fetch(OUTREACH_REGENERATE_URL, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          action: "regenerate",
-          proposal_id,
-          contact_id,
-          contact,
-          thread,
-          instruction: instruction || "draft fresh message based on conversation history and current rules",
-        }),
-      });
-
-      if (botRes.ok) {
-        const botJson = await botRes.json().catch(() => null);
-        if (botJson) {
-          if (botJson.proposed_text) {
-            draftText = botJson.proposed_text;
-          } else if (botJson.text) {
-            draftText = botJson.text;
-          } else if (botJson.message) {
-            draftText = botJson.message;
-          } else if (botJson.draft) {
-            draftText = botJson.draft;
-          } else if (botJson.bot_body) {
-            try {
-              const parsed = JSON.parse(botJson.bot_body);
-              draftText = parsed.proposed_text || parsed.text || parsed.message || parsed.draft;
-            } catch {}
+    if (botJson) {
+      if (botJson.proposed_text) {
+        draftText = botJson.proposed_text;
+      } else if (botJson.text) {
+        draftText = botJson.text;
+      } else if (botJson.message) {
+        draftText = botJson.message;
+      } else if (botJson.draft) {
+        draftText = botJson.draft;
+      } else if (botJson.bot_body) {
+        try {
+          const parsed = JSON.parse(botJson.bot_body);
+          draftText = parsed.proposed_text || parsed.text || parsed.message || parsed.draft;
+        } catch {
+          // If bot_body is raw text
+          if (typeof botJson.bot_body === "string" && botJson.bot_body.trim()) {
+            draftText = botJson.bot_body.trim();
           }
         }
       }
-    } catch (err: any) {
-      console.warn("[api/outreach/draft] Bot webhook exception, falling back to contextual generator:", err?.message || err);
     }
 
-    // 4. Fallback to contextual rule-based draft generator if bot webhook is unreachable
-    if (!draftText || !draftText.trim()) {
-      draftText = generateContextualDraft({
-        contactName: contact?.full_name || contact?.name,
-        company: contact?.company,
-        role: contact?.professional_title || contact?.role,
-        thread,
-        instruction,
-      });
+    // If bot webhook updated the proposal directly in the database, fetch it
+    if (!draftText) {
+      const fetchRes = await auth.client
+        .from("jf_outreach_proposals")
+        .select("*")
+        .eq("id", proposal_id)
+        .maybeSingle();
+
+      if (fetchRes.data && fetchRes.data.proposed_text && fetchRes.data.proposed_text.trim()) {
+        return NextResponse.json({
+          success: true,
+          data: fetchRes.data,
+        });
+      }
     }
 
+    // Do not generate draft text on the website. All draft text must come from the bot.
     if (!draftText || !draftText.trim()) {
       return NextResponse.json(
-        { error: "Failed to generate proposed text with bot." },
+        { error: "Bot did not return draft text. Please retry." },
         { status: 502 }
       );
     }
 
-    // 5. Update proposal with generated proposed_text
+    // Update proposal with generated proposed_text from bot
     const updateRes = await updateOutreachProposalText(proposal_id, draftText.trim());
 
     if (!updateRes.success || !updateRes.data) {
       return NextResponse.json(
-        { error: updateRes.error || "Failed to update draft proposal." },
+        { error: updateRes.error || "Failed to update draft proposal with bot response." },
         { status: 500 }
       );
     }

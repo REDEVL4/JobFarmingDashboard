@@ -20,7 +20,7 @@ WITH CHECK (
 
 CREATE OR REPLACE FUNCTION public.jf_create_outreach_proposal(
   p_contact_id uuid,
-  p_proposed_text text,
+  p_proposed_text text default '',
   p_action_type text default 'message'
 )
 RETURNS jsonb
@@ -32,12 +32,10 @@ DECLARE
   v_owner uuid;
   v_contact record;
   v_inserted record;
+  v_text text;
 BEGIN
   v_owner := coalesce(auth.uid(), 'f2729195-5445-4272-ab85-cac5b03b0967'::uuid);
-
-  IF nullif(trim(p_proposed_text), '') IS NULL THEN
-    RETURN jsonb_build_object('ok', false, 'error', 'proposed_text_required');
-  END IF;
+  v_text := coalesce(p_proposed_text, '');
 
   SELECT full_name, professional_title, company, linkedin_url, do_not_contact
     INTO v_contact
@@ -74,7 +72,7 @@ BEGIN
     v_contact.professional_title,
     v_contact.company,
     v_contact.linkedin_url,
-    trim(p_proposed_text),
+    v_text,
     'pending_approval',
     now(),
     now()
