@@ -193,3 +193,55 @@ test("Timeline Builder: hides deletion note rows and marks deleted message in or
   assert.equal(timeline[2].message_summary, "Sounds great, let me send over the spec.");
   assert.equal(getInteractionStatus(timeline[2]), null);
 });
+
+test("Proposal Matcher: matches by action_id when set", () => {
+  const proposal = {
+    id: "prop_99",
+    action_id: "act_42",
+    contact_id: "c_1",
+    proposed_text: "Let's connect",
+  };
+  const interactions = [
+    { id: "i_1", contact_id: "c_1", action_id: "act_42", message_summary: "Different text" },
+    { id: "i_2", contact_id: "c_1", message_summary: "Let's connect" },
+  ];
+  const matched = matchProposalToInteraction(proposal, interactions);
+  assert.equal(matched?.id, "i_1");
+});
+
+test("Proposal Matcher: matches by contact_id + sent_at time + text", () => {
+  const proposal = {
+    id: "prop_101",
+    contact_id: "c_99",
+    sent_at: "2026-11-15T14:00:00Z",
+    proposed_text: "Great chatting earlier today!",
+  };
+  const interactions = [
+    {
+      id: "i_other_contact",
+      contact_id: "c_other",
+      event_type: "message_sent",
+      direction: "outbound",
+      message_summary: "Great chatting earlier today!",
+      event_at: "2026-11-15T14:00:00Z",
+    },
+    {
+      id: "i_matched",
+      contact_id: "c_99",
+      event_type: "message_sent",
+      direction: "outbound",
+      message_summary: "Great chatting earlier today!",
+      event_at: "2026-11-15T14:00:05Z",
+    },
+    {
+      id: "i_different_text",
+      contact_id: "c_99",
+      event_type: "message_sent",
+      direction: "outbound",
+      message_summary: "Different topic altogether",
+      event_at: "2026-11-15T14:00:00Z",
+    },
+  ];
+  const matched = matchProposalToInteraction(proposal, interactions);
+  assert.equal(matched?.id, "i_matched");
+});
