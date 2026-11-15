@@ -91,3 +91,4 @@ $$;
 
 REVOKE ALL ON FUNCTION public.jf_create_outreach_proposal(uuid, text, text) FROM public;
 GRANT EXECUTE ON FUNCTION public.jf_create_outreach_proposal(uuid, text, text) TO authenticated, service_role;
+
