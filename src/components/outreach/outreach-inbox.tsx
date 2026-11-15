@@ -138,10 +138,13 @@ export function OutreachInbox({
   const [expandedInteractions, setExpandedInteractions] = useState<Record<string, boolean>>({});
 
   const toggleInteractionExpanded = (interactionId: string) => {
-    setExpandedInteractions((prev) => ({
-      ...prev,
-      [interactionId]: !prev[interactionId],
-    }));
+    setExpandedInteractions((prev) => {
+      const isCurrentlyExpanded = Boolean(prev[interactionId]);
+      if (isCurrentlyExpanded) {
+        return {};
+      }
+      return { [interactionId]: true };
+    });
   };
 
   // Requirement 2: New message action state
@@ -1394,41 +1397,48 @@ export function OutreachInbox({
                       <div
                         key={interaction.id}
                         className={cn(
-                          "flex flex-col space-y-1.5",
+                          "flex flex-col space-y-1 py-0.5",
                           isOutbound ? "items-end" : "items-start"
                         )}
                       >
-                        {/* Collapsed tag row: single tag with timestamp directly next to the tag */}
+                        {/* Compact row: small muted tag with timestamp on the same row */}
                         <div
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => toggleInteractionExpanded(interaction.id)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              toggleInteractionExpanded(interaction.id);
+                            }
+                          }}
                           className={cn(
-                            "flex items-center gap-2",
+                            "group inline-flex items-center gap-2 cursor-pointer select-none",
                             isOutbound ? "justify-end" : "justify-start"
                           )}
+                          title={isExpanded ? "Click to collapse" : "Click to view original message"}
                         >
                           {isOutbound && (
                             <span className="text-[10px] text-muted-foreground font-mono">
                               {formatDateTime(eventTime)}
                             </span>
                           )}
-                          <button
-                            type="button"
-                            onClick={() => toggleInteractionExpanded(interaction.id)}
+
+                          <span
                             className={cn(
-                              "inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-medium transition-all cursor-pointer border shadow-xs select-none",
-                              isOutbound
-                                ? "bg-rose-500/10 hover:bg-rose-500/20 text-rose-600 dark:text-rose-400 border-rose-500/30"
-                                : "bg-muted/80 hover:bg-muted text-muted-foreground hover:text-foreground border-border/80"
+                              "inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium transition-colors border shadow-2xs",
+                              "bg-muted/60 group-hover:bg-muted text-muted-foreground group-hover:text-foreground border-border/60"
                             )}
-                            title={isExpanded ? "Click to collapse" : "Click to view original text"}
                           >
-                            <Trash2 className="h-3 w-3 text-rose-500 shrink-0" />
+                            <Trash2 className="h-3 w-3 opacity-70 shrink-0" />
                             <span>Message deleted</span>
                             {isExpanded ? (
                               <ChevronUp className="h-3 w-3 opacity-60 ml-0.5" />
                             ) : (
                               <ChevronDown className="h-3 w-3 opacity-60 ml-0.5" />
                             )}
-                          </button>
+                          </span>
+
                           {!isOutbound && (
                             <span className="text-[10px] text-muted-foreground font-mono">
                               {formatDateTime(eventTime)}
@@ -1436,11 +1446,11 @@ export function OutreachInbox({
                           )}
                         </div>
 
-                        {/* On click of the tag, expand to show the original text */}
+                        {/* On click of the tag (or the row), toggle an expanded state that shows the original message text in a secondary, slightly faded bubble below the tag */}
                         {isExpanded && (
                           <div
                             className={cn(
-                              "px-4 py-2.5 max-w-[82%] sm:max-w-[75%] text-xs leading-relaxed whitespace-pre-wrap rounded-2xl shadow-xs border border-dashed border-rose-500/30 bg-rose-500/5 text-foreground/90",
+                              "px-3.5 py-2 max-w-[82%] sm:max-w-[75%] text-xs leading-relaxed whitespace-pre-wrap rounded-2xl shadow-2xs border border-border/60 bg-muted/40 text-muted-foreground opacity-85 mt-0.5",
                               isOutbound ? "rounded-tr-xs" : "rounded-tl-xs"
                             )}
                           >
@@ -1463,41 +1473,48 @@ export function OutreachInbox({
                       <div
                         key={interaction.id}
                         className={cn(
-                          "flex flex-col space-y-1.5",
+                          "flex flex-col space-y-1 py-0.5",
                           isOutbound ? "items-end" : "items-start"
                         )}
                       >
-                        {/* Collapsed tag row: single tag with timestamp directly next to the tag */}
+                        {/* Compact row: small muted tag with timestamp on the same row */}
                         <div
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => toggleInteractionExpanded(interaction.id)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              toggleInteractionExpanded(interaction.id);
+                            }
+                          }}
                           className={cn(
-                            "flex items-center gap-2",
+                            "group inline-flex items-center gap-2 cursor-pointer select-none",
                             isOutbound ? "justify-end" : "justify-start"
                           )}
+                          title={isExpanded ? "Click to collapse" : "Click to view original message"}
                         >
                           {isOutbound && (
                             <span className="text-[10px] text-muted-foreground font-mono">
                               {formatDateTime(eventTime)}
                             </span>
                           )}
-                          <button
-                            type="button"
-                            onClick={() => toggleInteractionExpanded(interaction.id)}
+
+                          <span
                             className={cn(
-                              "inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-medium transition-all cursor-pointer border shadow-xs select-none",
-                              isOutbound
-                                ? "bg-amber-500/10 hover:bg-amber-500/20 text-amber-600 dark:text-amber-400 border-amber-500/30"
-                                : "bg-muted/80 hover:bg-muted text-muted-foreground hover:text-foreground border-border/80"
+                              "inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium transition-colors border shadow-2xs",
+                              "bg-muted/60 group-hover:bg-muted text-muted-foreground group-hover:text-foreground border-border/60"
                             )}
-                            title={isExpanded ? "Click to collapse" : "Click to view original text"}
                           >
-                            <Pencil className="h-3 w-3 text-amber-500 shrink-0" />
+                            <Pencil className="h-3 w-3 opacity-70 shrink-0" />
                             <span>Message edited</span>
                             {isExpanded ? (
                               <ChevronUp className="h-3 w-3 opacity-60 ml-0.5" />
                             ) : (
                               <ChevronDown className="h-3 w-3 opacity-60 ml-0.5" />
                             )}
-                          </button>
+                          </span>
+
                           {!isOutbound && (
                             <span className="text-[10px] text-muted-foreground font-mono">
                               {formatDateTime(eventTime)}
@@ -1505,11 +1522,11 @@ export function OutreachInbox({
                           )}
                         </div>
 
-                        {/* On click of the tag, expand to show the original text */}
+                        {/* On click of the tag (or the row), toggle an expanded state that shows the original message text in a secondary, slightly faded bubble below the tag */}
                         {isExpanded && (
                           <div
                             className={cn(
-                              "px-4 py-2.5 max-w-[82%] sm:max-w-[75%] text-xs leading-relaxed whitespace-pre-wrap rounded-2xl shadow-xs border border-amber-500/30 bg-amber-500/5 text-foreground",
+                              "px-3.5 py-2 max-w-[82%] sm:max-w-[75%] text-xs leading-relaxed whitespace-pre-wrap rounded-2xl shadow-2xs border border-border/60 bg-muted/40 text-muted-foreground opacity-85 mt-0.5",
                               isOutbound ? "rounded-tr-xs" : "rounded-tl-xs"
                             )}
                           >

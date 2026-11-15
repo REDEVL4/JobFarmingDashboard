@@ -12,8 +12,29 @@ export function getInteractionStatus(
 
   const anyInt = interaction as any;
 
-  // 1. Deleted conditions:
-  // Explicitly check deleted_on_linkedin flag, notes, or any deleted marker
+  // 1. Generic check: any flag, note, or field containing "deleted_on_linkedin"
+  for (const [key, val] of Object.entries(anyInt)) {
+    if (key === "interaction" || key === "contact") continue;
+    if (/deleted_on_linkedin/i.test(key) && (val === true || val === "true" || Boolean(val))) {
+      return "deleted";
+    }
+    if (typeof val === "string" && /deleted_on_linkedin/i.test(val)) {
+      return "deleted";
+    }
+  }
+
+  // 2. Generic check: any flag, note, or field containing "edited_on_linkedin"
+  for (const [key, val] of Object.entries(anyInt)) {
+    if (key === "interaction" || key === "contact") continue;
+    if (/edited_on_linkedin/i.test(key) && (val === true || val === "true" || Boolean(val))) {
+      return "edited";
+    }
+    if (typeof val === "string" && /edited_on_linkedin/i.test(val)) {
+      return "edited";
+    }
+  }
+
+  // 3. Other deleted conditions / markers
   if (
     anyInt.deleted_on_linkedin === true ||
     anyInt.deleted_on_linkedin === "true" ||
@@ -47,8 +68,7 @@ export function getInteractionStatus(
     return "deleted";
   }
 
-  // 2. Edited conditions:
-  // Explicitly check edited_on_linkedin flag, notes, or any edited marker
+  // 4. Other edited conditions / markers
   if (
     anyInt.edited_on_linkedin === true ||
     anyInt.edited_on_linkedin === "true" ||

@@ -26,6 +26,8 @@ test("Interaction Status: detects deleted message by notes, evidence_source or e
   assert.equal(getInteractionStatus({ evidence_source: "linkedin_deleted_event" }), "deleted");
   assert.equal(getInteractionStatus({ evidence_source: "deleted_on_linkedin" }), "deleted");
   assert.equal(getInteractionStatus({ evidence_ref: "msg:deleted:123" }), "deleted");
+  assert.equal(getInteractionStatus({ custom_metadata: "flagged deleted_on_linkedin" }), "deleted");
+  assert.equal(getInteractionStatus({ deleted_on_linkedin_at: "2026-11-15T02:00:00Z" }), "deleted");
 });
 
 test("Interaction Status: detects LinkedIn deletion summary text", () => {
@@ -55,6 +57,8 @@ test("Interaction Status: detects edited message by notes, evidence or suffix", 
   assert.equal(getInteractionStatus({ notes: "Message edited on LinkedIn" }), "edited");
   assert.equal(getInteractionStatus({ notes: "marked edited_on_linkedin" }), "edited");
   assert.equal(getInteractionStatus({ evidence_source: "edited_on_linkedin" }), "edited");
+  assert.equal(getInteractionStatus({ custom_metadata: "flagged edited_on_linkedin" }), "edited");
+  assert.equal(getInteractionStatus({ edited_on_linkedin_at: "2026-11-15T02:00:00Z" }), "edited");
   assert.equal(getInteractionStatus({ message_summary: "Hey there! (edited)" }), "edited");
   assert.equal(getInteractionStatus({ message_summary: "[Message edited]" }), "edited");
 });
