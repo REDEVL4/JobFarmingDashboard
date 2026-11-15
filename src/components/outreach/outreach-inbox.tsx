@@ -21,10 +21,22 @@ import {
   UserPlus,
   UserCheck,
   FileText,
+  Plus,
+  Trash2,
+  Pencil,
+  ChevronDown,
+  ChevronUp,
+  Send,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn, formatDateTime, formatRelativeTime } from "@/lib/utils";
 import { createClient } from "@/lib/supabase/client";
+import {
+  getInteractionStatus,
+  buildNewProposalPayload,
+  buildRegeneratePayload,
+  applyRegeneratedProposalText,
+} from "@/lib/outreach-helpers";
 import type { DbOutreachContact } from "@/types/database";
 import type {
   OutreachConversationItem,
@@ -121,6 +133,29 @@ export function OutreachInbox({
   );
   const prevContactIdRef = useRef<string | null>(selectedContactId);
   const prevProposalIdRef = useRef<string | null>(activeProposal?.id || null);
+
+  // Requirement 1: Expanded interactions for deleted / edited messages
+  const [expandedInteractions, setExpandedInteractions] = useState<Record<string, boolean>>({});
+
+  const toggleInteractionExpanded = (interactionId: string) => {
+    setExpandedInteractions((prev) => ({
+      ...prev,
+      [interactionId]: !prev[interactionId],
+    }));
+  };
+
+  // Requirement 2: New message action state
+  const [isNewMessageOpen, setIsNewMessageOpen] = useState(false);
+  const [newMessageText, setNewMessageText] = useState("");
+  const [isSavingNewMessage, setIsSavingNewMessage] = useState(false);
+  const [newMessageError, setNewMessageError] = useState<string | null>(null);
+  const newMessageInputRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    if (isNewMessageOpen && newMessageInputRef.current) {
+      newMessageInputRef.current.focus();
+    }
+  }, [isNewMessageOpen]);
 
   // Cleanup polling interval on unmount
   useEffect(() => {
@@ -590,10 +625,60 @@ export function OutreachInbox({
     }
   };
 
-  const handleRegenerate = async () => {
+  const handleSaveNewMessage = async () => {
+    if (!selectedContact || !newMessageText.trim() || isSavingNewMessage) return;
+
+    setIsSavingNewMessage(true);
+    setNewMessageError(null);
+
+    try {
+      const payload = buildNewProposalPayload(selectedContact, newMessageText);
+
+      const res = await fetch("/api/outreach/proposals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "create",
+          contact_id: payload.contact_id,
+          proposed_text: payload.proposed_text,
+          channel: payload.channel,
+          action_type: payload.action_type,
+        }),
+      });
+
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json.data) {
+        throw new Error(json.error || "Failed to save proposal draft");
+      }
+
+      const createdProposal: OutreachProposal = json.data;
+
+      setProposals((prev) => [createdProposal, ...prev.filter((p) => p.id !== createdProposal.id)]);
+      setComposerText(createdProposal.proposed_text);
+      savedProposalTextRef.current = createdProposal.proposed_text;
+      setJustApproved(false);
+      setIsNewMessageOpen(false);
+      setNewMessageText("");
+
+      startTransition(() => {
+        router.refresh();
+      });
+    } catch (err: any) {
+      console.error("Save new message proposal error:", err);
+      setNewMessageError(err.message || "Failed to save new message draft");
+    } finally {
+      setIsSavingNewMessage(false);
+    }
+  };
+
+  const handleRegenerate = async (targetProposalId?: string) => {
+    const proposal = targetProposalId
+      ? proposals.find((p) => p.id === targetProposalId)
+      : activeProposal;
+
     if (
-      !activeProposal ||
-      activeProposal.state !== "pending_approval" ||
+      !proposal ||
+      proposal.state !== "pending_approval" ||
       isRewriting ||
       isResolving
     ) {
@@ -603,10 +688,9 @@ export function OutreachInbox({
     setIsRewriting(true);
     setErrorFeedback(null);
 
-    const originalProposedText = activeProposal.proposed_text || "";
-    const proposalId = activeProposal.id;
-    const instruction =
-      customizeInstruction.trim() || "regenerate, more natural, show curiosity";
+    const originalProposedText = proposal.proposed_text || "";
+    const proposalId = proposal.id;
+    const { instruction } = buildRegeneratePayload(proposalId, customizeInstruction);
 
     try {
       const supabase = createClient();
@@ -640,6 +724,26 @@ export function OutreachInbox({
           setIsRewriting(false);
           return;
         }
+      } else {
+        try {
+          const resJson = await res.json();
+          let immediateText: string | null = null;
+          if (resJson?.bot_body) {
+            try {
+              const parsed = JSON.parse(resJson.bot_body);
+              immediateText = parsed.proposed_text || parsed.text || parsed.message || parsed.draft;
+            } catch {}
+          }
+          if (immediateText && immediateText !== originalProposedText) {
+            setComposerText(immediateText);
+            savedProposalTextRef.current = immediateText;
+            setProposals((prev) =>
+              prev.map((p) => (p.id === proposalId ? applyRegeneratedProposalText(p, immediateText!) : p))
+            );
+            setIsRewriting(false);
+            return;
+          }
+        } catch {}
       }
     } catch (err: any) {
       console.error("[outreach-regenerate] error calling function:", err);
@@ -687,7 +791,7 @@ export function OutreachInbox({
             // Update proposals in local state
             setProposals((prev) =>
               prev.map((p) =>
-                p.id === proposalId ? { ...p, proposed_text: updated.proposed_text } : p
+                p.id === proposalId ? applyRegeneratedProposalText(p, updated.proposed_text) : p
               )
             );
 
@@ -1210,6 +1314,28 @@ export function OutreachInbox({
                   </span>
                 </div>
 
+                {/* New message Action Button */}
+                <div className="flex flex-col items-end text-right">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setIsNewMessageOpen(true);
+                      setNewMessageText("");
+                      setNewMessageError(null);
+                    }}
+                    className="h-7 px-2 sm:px-2.5 text-[11px] font-medium gap-1.5 border-border bg-background hover:bg-muted text-foreground transition-colors shrink-0"
+                    title="Draft a fresh outbound message to this contact"
+                  >
+                    <Plus className="h-3.5 w-3.5 text-primary" />
+                    <span>New message</span>
+                  </Button>
+                  <span className="text-[9px] text-muted-foreground hidden 2xl:inline max-w-[200px] truncate">
+                    Draft fresh outbound message
+                  </span>
+                </div>
+
                 {/* Refresh Button */}
                 <Button
                   variant="outline"
@@ -1253,6 +1379,102 @@ export function OutreachInbox({
                 interactions.map((interaction) => {
                   const isOutbound = (interaction.direction || "").toLowerCase() === "outbound";
                   const eventTime = interaction.event_at || interaction.created_at;
+                  const status = getInteractionStatus(interaction);
+                  const isExpanded = Boolean(expandedInteractions[interaction.id]);
+
+                  if (status === "deleted") {
+                    return (
+                      <div
+                        key={interaction.id}
+                        className={cn(
+                          "flex flex-col space-y-1",
+                          isOutbound ? "items-end" : "items-start"
+                        )}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => toggleInteractionExpanded(interaction.id)}
+                          className={cn(
+                            "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium transition-all cursor-pointer border shadow-xs",
+                            isOutbound
+                              ? "bg-rose-500/10 hover:bg-rose-500/20 text-rose-600 dark:text-rose-400 border-rose-500/30"
+                              : "bg-muted/80 hover:bg-muted text-muted-foreground hover:text-foreground border-border/80"
+                          )}
+                          title="Click to toggle deleted message text"
+                        >
+                          <Trash2 className="h-3 w-3 text-rose-500 shrink-0" />
+                          <span>Message deleted</span>
+                          {isExpanded ? (
+                            <ChevronUp className="h-3 w-3 opacity-60 ml-0.5" />
+                          ) : (
+                            <ChevronDown className="h-3 w-3 opacity-60 ml-0.5" />
+                          )}
+                        </button>
+
+                        {isExpanded && (
+                          <div
+                            className={cn(
+                              "px-4 py-2.5 max-w-[82%] sm:max-w-[75%] text-xs leading-relaxed whitespace-pre-wrap rounded-2xl shadow-xs mt-1 border border-dashed border-rose-500/30 bg-rose-500/5 text-foreground/90",
+                              isOutbound ? "rounded-tr-xs" : "rounded-tl-xs"
+                            )}
+                          >
+                            {interaction.message_summary || "(No content)"}
+                          </div>
+                        )}
+
+                        <span className="text-[10px] text-muted-foreground font-mono px-1">
+                          {formatDateTime(eventTime)}
+                        </span>
+                      </div>
+                    );
+                  }
+
+                  if (status === "edited") {
+                    return (
+                      <div
+                        key={interaction.id}
+                        className={cn(
+                          "flex flex-col space-y-1",
+                          isOutbound ? "items-end" : "items-start"
+                        )}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => toggleInteractionExpanded(interaction.id)}
+                          className={cn(
+                            "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium transition-all cursor-pointer border shadow-xs",
+                            isOutbound
+                              ? "bg-amber-500/10 hover:bg-amber-500/20 text-amber-600 dark:text-amber-400 border-amber-500/30"
+                              : "bg-muted/80 hover:bg-muted text-muted-foreground hover:text-foreground border-border/80"
+                          )}
+                          title="Click to toggle edited message text"
+                        >
+                          <Pencil className="h-3 w-3 text-amber-500 shrink-0" />
+                          <span>Message edited</span>
+                          {isExpanded ? (
+                            <ChevronUp className="h-3 w-3 opacity-60 ml-0.5" />
+                          ) : (
+                            <ChevronDown className="h-3 w-3 opacity-60 ml-0.5" />
+                          )}
+                        </button>
+
+                        {isExpanded && (
+                          <div
+                            className={cn(
+                              "px-4 py-2.5 max-w-[82%] sm:max-w-[75%] text-xs leading-relaxed whitespace-pre-wrap rounded-2xl shadow-xs mt-1 border border-amber-500/30 bg-amber-500/5 text-foreground",
+                              isOutbound ? "rounded-tr-xs" : "rounded-tl-xs"
+                            )}
+                          >
+                            {interaction.message_summary || "(No content)"}
+                          </div>
+                        )}
+
+                        <span className="text-[10px] text-muted-foreground font-mono px-1">
+                          {formatDateTime(eventTime)}
+                        </span>
+                      </div>
+                    );
+                  }
 
                   return (
                     <div
@@ -1282,12 +1504,170 @@ export function OutreachInbox({
                   );
                 })
               )}
+
+              {/* Inline Pending Draft card in thread */}
+              {activeProposal && activeProposal.state === "pending_approval" && (
+                <div className="flex flex-col items-end space-y-1 pt-2">
+                  <div className="p-3.5 max-w-[85%] sm:max-w-[78%] rounded-2xl rounded-tr-xs bg-card border border-primary/40 shadow-sm space-y-2">
+                    <div className="flex items-center justify-between gap-2 text-[11px]">
+                      <div className="flex items-center gap-1.5 font-semibold text-primary">
+                        <Bot className="h-3.5 w-3.5" />
+                        <span>Pending Draft ({activeProposal.channel || "LinkedIn"})</span>
+                      </div>
+                      <span className="text-[9px] px-1.5 py-0.5 rounded font-bold uppercase bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30">
+                        Draft Pending Review
+                      </span>
+                    </div>
+
+                    <p className="text-xs text-foreground whitespace-pre-wrap leading-relaxed">
+                      {composerText || activeProposal.proposed_text}
+                    </p>
+
+                    {activeProposal.attachment_path && (
+                      <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground pt-0.5">
+                        <FileText className="h-3 w-3 text-primary shrink-0" />
+                        {activeProposal.action_type === "resume_share" && (
+                          <span className="font-semibold text-primary">Resume attached:</span>
+                        )}
+                        <span className="truncate">{activeProposal.attachment_path.split("/").pop()}</span>
+                      </div>
+                    )}
+
+                    <div className="flex items-center justify-end gap-1.5 pt-1.5 border-t border-border/40">
+                      <Button
+                        size="sm"
+                        disabled={isResolving || isRewriting}
+                        onClick={handleApproveProposal}
+                        className="h-6 text-[11px] bg-emerald-600 hover:bg-emerald-700 text-white font-medium gap-1 px-2.5 cursor-pointer disabled:cursor-not-allowed"
+                      >
+                        {isResolving ? <RotateCw className="h-2.5 w-2.5 animate-spin" /> : <Check className="h-2.5 w-2.5" />}
+                        <span>Approve</span>
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={isResolving || isRewriting}
+                        onClick={handleRejectProposal}
+                        className="h-6 text-[11px] text-rose-600 hover:text-rose-700 border-border px-2.5 cursor-pointer disabled:cursor-not-allowed"
+                      >
+                        <X className="h-2.5 w-2.5" />
+                        <span>Reject</span>
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={isResolving || isRewriting}
+                        onClick={() => handleRegenerate()}
+                        className="h-6 text-[11px] gap-1 px-2.5 border-border hover:bg-muted text-foreground cursor-pointer disabled:cursor-not-allowed"
+                        title="Regenerate proposal draft"
+                      >
+                        {isRewriting ? <RotateCw className="h-2.5 w-2.5 animate-spin text-amber-500" /> : <Sparkles className="h-2.5 w-2.5 text-amber-500" />}
+                        <span>{isRewriting ? "Regenerating..." : "Regenerate"}</span>
+                      </Button>
+                    </div>
+                  </div>
+                  <span className="text-[10px] text-muted-foreground font-mono px-1">
+                    Pending owner approval
+                  </span>
+                </div>
+              )}
             </div>
 
             {/* Bottom Composer */}
             <div className="p-3 sm:p-4 border-t border-border bg-card/80 space-y-2 shrink-0">
-              {/* If proposal was approved */}
-              {justApproved ? (
+              {isNewMessageOpen ? (
+                /* New Outbound Message Draft Panel */
+                <div className="space-y-2.5 p-3 rounded-xl border border-primary/40 bg-card/90 shadow-xs">
+                  <div className="flex items-center justify-between text-xs">
+                    <div className="flex items-center gap-2">
+                      <Send className="h-3.5 w-3.5 text-primary" />
+                      <span className="font-bold text-foreground">New Outbound Message</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary border border-primary/20 font-semibold uppercase">
+                        Fresh Draft
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-[10px] text-muted-foreground">
+                        {newMessageText.length} characters
+                      </span>
+                      <button
+                        type="button"
+                        disabled={isSavingNewMessage}
+                        onClick={() => {
+                          setIsNewMessageOpen(false);
+                          setNewMessageText("");
+                          setNewMessageError(null);
+                        }}
+                        className="p-1 rounded text-muted-foreground hover:text-foreground cursor-pointer"
+                        title="Cancel"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
+
+                  <textarea
+                    ref={newMessageInputRef}
+                    value={newMessageText}
+                    onChange={(e) => setNewMessageText(e.target.value)}
+                    rows={3}
+                    disabled={isSavingNewMessage}
+                    placeholder="Type a fresh outbound message for review..."
+                    className="w-full resize-y p-2.5 text-xs rounded-lg border border-input bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring transition-all disabled:opacity-70"
+                  />
+
+                  {newMessageError && (
+                    <div className="flex items-center gap-1.5 text-xs text-rose-600 bg-rose-500/10 border border-rose-500/20 p-2 rounded-lg">
+                      <ShieldAlert className="h-3.5 w-3.5 shrink-0" />
+                      <span>{newMessageError}</span>
+                    </div>
+                  )}
+
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-1">
+                    <p className="text-[11px] text-muted-foreground">
+                      Will be saved as an outreach proposal with state <strong>pending for review</strong>.
+                    </p>
+
+                    <div className="flex items-center gap-2 self-end sm:self-auto">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={isSavingNewMessage}
+                        onClick={() => {
+                          setIsNewMessageOpen(false);
+                          setNewMessageText("");
+                          setNewMessageError(null);
+                        }}
+                        className="h-7 text-xs font-medium px-2.5 border-border text-muted-foreground hover:text-foreground cursor-pointer"
+                      >
+                        Cancel
+                      </Button>
+
+                      <Button
+                        type="button"
+                        size="sm"
+                        disabled={isSavingNewMessage || !newMessageText.trim()}
+                        onClick={handleSaveNewMessage}
+                        className="h-7 text-xs bg-primary hover:bg-primary/90 text-primary-foreground font-medium gap-1 px-3 shadow-xs cursor-pointer disabled:cursor-not-allowed"
+                      >
+                        {isSavingNewMessage ? (
+                          <>
+                            <RotateCw className="h-3 w-3 animate-spin" />
+                            <span>Saving...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Check className="h-3 w-3" />
+                            <span>Save Draft for Review</span>
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              ) : justApproved ? (
                 <div className="space-y-2">
                   <div className="flex items-center gap-2 p-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-700 dark:text-emerald-300 font-semibold text-xs">
                     <Check className="h-4 w-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
@@ -1306,7 +1686,7 @@ export function OutreachInbox({
                   </p>
                 </div>
               ) : activeProposal && activeProposal.state === "pending_approval" ? (
-                /* Editable Composer for Pending Proposal (Always kept per requirement 7) */
+                /* Editable Composer for Pending Proposal */
                 <div className="space-y-2">
                   <div className="flex items-center justify-between text-[11px] text-muted-foreground">
                     <span className="font-semibold text-foreground flex items-center gap-1.5">
@@ -1319,9 +1699,24 @@ export function OutreachInbox({
                         </span>
                       )}
                     </span>
-                    <span className="font-mono text-[10px]">
-                      {composerText.length} characters
-                    </span>
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsNewMessageOpen(true);
+                          setNewMessageText("");
+                          setNewMessageError(null);
+                        }}
+                        className="text-[10px] text-primary hover:underline flex items-center gap-1 font-semibold cursor-pointer"
+                        title="Start a fresh message instead of replying to this draft"
+                      >
+                        <Plus className="h-2.5 w-2.5" />
+                        <span>New message</span>
+                      </button>
+                      <span className="font-mono text-[10px]">
+                        {composerText.length} characters
+                      </span>
+                    </div>
                   </div>
 
                   {activeProposal.signal && (
@@ -1381,18 +1776,18 @@ export function OutreachInbox({
                   )}
 
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pt-1">
-                    {/* Customize & Regenerate Controls */}
+                    {/* Tone Instruction Field */}
                     <div className="flex items-center gap-1.5 flex-1 min-w-0">
                       <label
                         htmlFor="outreach-customize-input"
                         className="text-[11px] font-semibold text-muted-foreground shrink-0"
                       >
-                        Customize
+                        Tone:
                       </label>
                       <input
                         id="outreach-customize-input"
                         type="text"
-                        placeholder="more natural, show curiosity"
+                        placeholder="e.g. make it more casual, show curiosity..."
                         value={customizeInstruction}
                         onChange={(e) => setCustomizeInstruction(e.target.value)}
                         onKeyDown={(e) => {
@@ -1402,27 +1797,11 @@ export function OutreachInbox({
                           }
                         }}
                         disabled={isResolving || isRewriting}
-                        className="h-7 px-2.5 text-xs bg-background border border-input rounded-md text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring flex-1 max-w-xs transition-colors disabled:opacity-50"
+                        className="h-7 px-2.5 text-xs bg-background border border-input rounded-md text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring flex-1 max-w-sm transition-colors disabled:opacity-50"
                       />
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        disabled={isResolving || isRewriting}
-                        onClick={handleRegenerate}
-                        className="h-7 text-xs font-medium gap-1 px-2.5 border-border text-foreground hover:bg-muted shrink-0 cursor-pointer disabled:cursor-not-allowed"
-                        title="Regenerate proposal draft"
-                      >
-                        {isRewriting ? (
-                          <RotateCw className="h-3 w-3 animate-spin" />
-                        ) : (
-                          <Sparkles className="h-3 w-3 text-amber-500" />
-                        )}
-                        <span>{isRewriting ? "Rewriting..." : "Regenerate"}</span>
-                      </Button>
                     </div>
 
-                    {/* Approve & Reject Controls */}
+                    {/* Action buttons: Approve / Reject / Regenerate */}
                     <div className="flex items-center gap-2 shrink-0">
                       <Button
                         size="sm"
@@ -1448,17 +1827,51 @@ export function OutreachInbox({
                         <X className="h-3 w-3" />
                         <span>Reject</span>
                       </Button>
+
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={isResolving || isRewriting}
+                        onClick={() => handleRegenerate()}
+                        className="h-7 text-xs font-medium gap-1 px-3 border-border text-foreground hover:bg-muted cursor-pointer disabled:cursor-not-allowed"
+                        title="Regenerate proposal draft"
+                      >
+                        {isRewriting ? (
+                          <RotateCw className="h-3 w-3 animate-spin text-amber-500" />
+                        ) : (
+                          <Sparkles className="h-3 w-3 text-amber-500" />
+                        )}
+                        <span>{isRewriting ? "Regenerating..." : "Regenerate"}</span>
+                      </Button>
                     </div>
                   </div>
                 </div>
               ) : (
-                /* Disabled Composer when no pending proposal */
-                <div className="space-y-1.5">
+                /* Composer when no pending proposal */
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-foreground">Outbound Composer</span>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        setIsNewMessageOpen(true);
+                        setNewMessageText("");
+                        setNewMessageError(null);
+                      }}
+                      className="h-6 text-[11px] font-medium gap-1 px-2.5 border-border text-foreground hover:bg-muted"
+                    >
+                      <Plus className="h-3 w-3 text-primary" />
+                      <span>New message</span>
+                    </Button>
+                  </div>
                   <textarea
                     disabled
-                    placeholder="Write a message..."
-                    rows={3}
-                    className="w-full resize-none p-3 text-xs bg-muted/40 text-muted-foreground border border-input rounded-lg cursor-not-allowed placeholder:text-muted-foreground/60 focus:outline-none"
+                    placeholder="No pending draft. Click 'New message' to draft a fresh outbound message..."
+                    rows={2}
+                    className="w-full resize-none p-2.5 text-xs bg-muted/40 text-muted-foreground border border-input rounded-lg cursor-not-allowed placeholder:text-muted-foreground/60 focus:outline-none"
                   />
                   <p className="text-[11px] text-muted-foreground">
                     {outreachMode === "auto"

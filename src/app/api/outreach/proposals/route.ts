@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthenticatedOwner } from "@/lib/supabase/server";
-import { resolveOutreachProposal, fetchOutreachProposalById } from "@/lib/data-service";
+import { resolveOutreachProposal, fetchOutreachProposalById, createOutreachProposal } from "@/lib/data-service";
 
 const OUTREACH_TRIGGER_URL =
   process.env.NEXT_PUBLIC_SUPABASE_URL
@@ -39,18 +39,47 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json();
-    const { id, action, approved_text } = body;
+    const { id, action, approved_text, contact_id, proposed_text, channel = "linkedin", action_type = "message" } = body;
 
-    if (!id || !action) {
+    if (!action) {
       return NextResponse.json(
-        { error: "Bad Request: id and action are required." },
+        { error: "Bad Request: action is required." },
         { status: 400 }
       );
     }
 
-    if (!["approve", "reject"].includes(action)) {
+    if (!["approve", "reject", "create"].includes(action)) {
       return NextResponse.json(
-        { error: `Invalid action: ${action}. Must be one of 'approve', 'reject'.` },
+        { error: `Invalid action: ${action}. Must be one of 'approve', 'reject', 'create'.` },
+        { status: 400 }
+      );
+    }
+
+    if (action === "create") {
+      if (!contact_id || !proposed_text?.trim()) {
+        return NextResponse.json(
+          { error: "Bad Request: contact_id and non-empty proposed_text are required to create a proposal." },
+          { status: 400 }
+        );
+      }
+
+      const createResult = await createOutreachProposal({
+        contact_id,
+        proposed_text: proposed_text.trim(),
+        channel,
+        action_type,
+      });
+
+      if (!createResult.success) {
+        return NextResponse.json({ error: createResult.error }, { status: 400 });
+      }
+
+      return NextResponse.json({ success: true, data: createResult.data });
+    }
+
+    if (!id) {
+      return NextResponse.json(
+        { error: "Bad Request: id is required for approve or reject." },
         { status: 400 }
       );
     }
