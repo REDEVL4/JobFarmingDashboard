@@ -124,27 +124,29 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Do not generate draft text on the website. All draft text must come from the bot.
-    if (!draftText || !draftText.trim()) {
-      return NextResponse.json(
-        { error: "Bot did not return draft text. Please retry." },
-        { status: 502 }
-      );
+    // If bot returned draft text immediately, update proposal in database
+    if (draftText && draftText.trim()) {
+      const updateRes = await updateOutreachProposalText(proposal_id, draftText.trim());
+
+      if (!updateRes.success || !updateRes.data) {
+        return NextResponse.json(
+          { error: updateRes.error || "Failed to update draft proposal with bot response." },
+          { status: 500 }
+        );
+      }
+
+      return NextResponse.json({
+        success: true,
+        data: updateRes.data,
+      });
     }
 
-    // Update proposal with generated proposed_text from bot
-    const updateRes = await updateOutreachProposalText(proposal_id, draftText.trim());
-
-    if (!updateRes.success || !updateRes.data) {
-      return NextResponse.json(
-        { error: updateRes.error || "Failed to update draft proposal with bot response." },
-        { status: 500 }
-      );
-    }
-
+    // Requirement 1: Bot call returned 200 before bot finishes writing.
+    // Return 200 indicating trigger succeeded so client polls proposal by id until proposed_text updates.
     return NextResponse.json({
       success: true,
-      data: updateRes.data,
+      triggered: true,
+      data: { id: proposal_id, state: "pending_approval", proposed_text: "" },
     });
   } catch (err: any) {
     console.error("[api/outreach/draft] Exception:", err);

@@ -191,6 +191,7 @@ export function OutreachInbox({
         pollTimerRef.current = null;
       }
       setIsRewriting(false);
+      setIsDraftingNewMessage(false);
 
       // Switched contact or proposal: load the new proposal text
       setComposerText(newSavedText);
@@ -623,16 +624,207 @@ export function OutreachInbox({
     }
   };
 
+  /**
+   * Helper to poll a proposal every 3-5 seconds until proposed_text changes or 45s pass.
+   * Requirement 1: Do not assume text is ready immediately. The call returns 200 before the bot finishes writing.
+   * Requirement 2: Poll proposal every 3-5 seconds (by id) until proposed_text changes or 45 seconds pass.
+   * Requirement 3: When proposed_text updates, refresh the draft in the composer and show the new text.
+   * Requirement 5: Show a loading state ("Drafting…") while polling.
+   */
+  const startProposalPolling = (proposalId: string, baselineText: string) => {
+    const startTime = Date.now();
+    const MAX_DURATION_MS = 45000; // 45 seconds
+    const POLL_INTERVAL_MS = 3500; // 3.5 seconds (within 3–5 seconds requirement)
+
+    if (pollTimerRef.current) {
+      clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+
+    setIsDraftingNewMessage(true);
+    setIsRewriting(true);
+
+    const checkProposal = async () => {
+      const elapsed = Date.now() - startTime;
+      if (elapsed >= MAX_DURATION_MS) {
+        if (pollTimerRef.current) {
+          clearInterval(pollTimerRef.current);
+          pollTimerRef.current = null;
+        }
+        setIsDraftingNewMessage(false);
+        setIsRewriting(false);
+        return;
+      }
+
+      try {
+        const pollRes = await fetch(`/api/outreach/proposals?id=${encodeURIComponent(proposalId)}`);
+        if (!pollRes.ok) return;
+
+        const pollJson = await pollRes.json();
+        const updated = pollJson.data;
+
+        if (updated && updated.id === proposalId) {
+          const newText = (updated.proposed_text || "").trim();
+          if (newText && newText !== baselineText.trim()) {
+            if (pollTimerRef.current) {
+              clearInterval(pollTimerRef.current);
+              pollTimerRef.current = null;
+            }
+
+            // Refresh draft in composer and show new text
+            setComposerText(updated.proposed_text);
+            savedProposalTextRef.current = updated.proposed_text;
+
+            setProposals((prev) =>
+              prev.map((p) =>
+                p.id === proposalId
+                  ? { ...p, proposed_text: updated.proposed_text, state: "pending_approval" }
+                  : p
+              )
+            );
+
+            setIsDraftingNewMessage(false);
+            setIsRewriting(false);
+
+            startTransition(() => {
+              router.refresh();
+            });
+          }
+        }
+      } catch (pollErr) {
+        console.error("[outreach] Polling proposal check failed:", pollErr);
+      }
+    };
+
+    pollTimerRef.current = setInterval(checkProposal, POLL_INTERVAL_MS);
+  };
+
+  /**
+   * Helper to trigger draft generation via /api/outreach/draft then initiate polling.
+   */
+  const triggerProposalGeneration = async (proposalId: string, baselineText: string) => {
+    setIsDraftingNewMessage(true);
+    setIsRewriting(true);
+    setErrorFeedback(null);
+
+    try {
+      const draftRes = await fetch("/api/outreach/draft", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          proposal_id: proposalId,
+          instruction: customizeInstruction || undefined,
+          contact_id: selectedContact?.id,
+          thread: timelineInteractions.map((int: OutreachInteraction) => ({
+            direction: int.direction,
+            event_type: int.event_type,
+            message_summary: int.message_summary,
+            event_at: int.event_at || int.created_at,
+          })),
+        }),
+      });
+
+      if (!draftRes.ok) {
+        const draftErr = await draftRes.json().catch(() => ({}));
+        const statusMsg =
+          draftRes.status === 404
+            ? "Proposal not found (404). Please click Regenerate to retry."
+            : draftRes.status === 409
+            ? "Proposal is not pending approval (409)."
+            : draftRes.status === 400
+            ? "Bad Request (400): Missing proposal id."
+            : draftErr.error || `Bot failed to initiate draft (${draftRes.status})`;
+        setErrorFeedback(statusMsg);
+        setIsDraftingNewMessage(false);
+        setIsRewriting(false);
+        return;
+      }
+
+      // Requirement 1: After calling regenerate (or draft endpoint), do not assume text is ready immediately.
+      // The call returns 200 before the bot finishes writing.
+      const draftJson = await draftRes.json().catch(() => null);
+      const returnedText = draftJson?.data?.proposed_text || draftJson?.proposed_text || null;
+      if (returnedText && returnedText.trim() && returnedText.trim() !== baselineText.trim()) {
+        setComposerText(returnedText);
+        savedProposalTextRef.current = returnedText;
+        setProposals((prev) =>
+          prev.map((p) =>
+            p.id === proposalId
+              ? { ...p, proposed_text: returnedText, state: "pending_approval" }
+              : p
+          )
+        );
+        setIsDraftingNewMessage(false);
+        setIsRewriting(false);
+        startTransition(() => {
+          router.refresh();
+        });
+        return;
+      }
+
+      // Requirement 2: Poll proposal every 3-5 seconds until proposed_text changes or 45 seconds pass
+      startProposalPolling(proposalId, baselineText);
+    } catch (err: any) {
+      console.error("[outreach] Draft generation trigger error:", err);
+      setErrorFeedback(err?.message || "Failed to initiate draft generation");
+      setIsDraftingNewMessage(false);
+      setIsRewriting(false);
+    }
+  };
+
   const handleNewMessageDraft = async () => {
     if (!selectedContact || isDraftingNewMessage || isRewriting || isResolving) return;
 
+    // Requirement 4: If a pending_approval proposal already exists for the contact,
+    // show that draft instead of creating another one or doing nothing.
+    let pendingProposal = proposals.find(
+      (p) => p.contact_id === selectedContact.id && p.state === "pending_approval"
+    );
+
+    if (!pendingProposal) {
+      // Also check server for contact before inserting to avoid duplicates
+      try {
+        const checkRes = await fetch(`/api/outreach/proposals?contact_id=${encodeURIComponent(selectedContact.id)}`);
+        if (checkRes.ok) {
+          const checkJson = await checkRes.json();
+          const serverList: OutreachProposal[] = checkJson.data || [];
+          const serverPending = serverList.find((p) => p.state === "pending_approval");
+          if (serverPending) {
+            pendingProposal = serverPending;
+            setProposals((prev) => [serverPending, ...prev.filter((p) => p.id !== serverPending.id)]);
+          }
+        }
+      } catch (checkErr) {
+        console.warn("[outreach] Check server proposals error:", checkErr);
+      }
+    }
+
+    if (pendingProposal) {
+      // Show that draft in the composer
+      const existingText = pendingProposal.approved_text || pendingProposal.proposed_text || "";
+      setComposerText(existingText);
+      savedProposalTextRef.current = existingText;
+      setJustApproved(false);
+      setErrorFeedback(null);
+
+      // If it already has proposed_text, display that draft for review
+      if (pendingProposal.proposed_text && pendingProposal.proposed_text.trim()) {
+        return;
+      }
+
+      // If pending proposal exists but proposed_text is empty, trigger bot generation on it
+      await triggerProposalGeneration(pendingProposal.id, pendingProposal.proposed_text || "");
+      return;
+    }
+
+    // If no pending_approval proposal exists, create a new one:
     setIsDraftingNewMessage(true);
+    setIsRewriting(true);
     setErrorFeedback(null);
 
     let createdProposal: OutreachProposal | null = null;
 
     try {
-      // 1. On click, first create a new outreach_proposal for the contact with state = 'pending_approval' and action_type = 'message'
       const createRes = await fetch("/api/outreach/proposals", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -652,77 +844,23 @@ export function OutreachInbox({
 
       createdProposal = createJson.data as OutreachProposal;
 
-      // Keep the new pending proposal in state and select it as active draft
+      // Keep new pending proposal in state and select it as active draft
       setProposals((prev) => [createdProposal!, ...prev.filter((p) => p.id !== createdProposal!.id)]);
       setComposerText(createdProposal.proposed_text || "");
       savedProposalTextRef.current = createdProposal.proposed_text || "";
       setJustApproved(false);
 
-      // 2. Then call the bot (or the regenerate endpoint) with that proposal id and the full prior thread so the bot fills in proposed_text
-      // Rule: Do not call regenerate without a proposal id
       if (!createdProposal.id) {
         throw new Error("Cannot call regenerate: missing proposal id");
       }
 
-      const draftRes = await fetch("/api/outreach/draft", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          proposal_id: createdProposal.id,
-          contact_id: selectedContact.id,
-          contact: selectedContact,
-          thread: timelineInteractions.map((int: OutreachInteraction) => ({
-            direction: int.direction,
-            event_type: int.event_type,
-            message_summary: int.message_summary,
-            event_at: int.event_at || int.created_at,
-          })),
-          instruction: customizeInstruction || undefined,
-        }),
-      });
-
-      // If the call returns 400, 404, or 409, show the error and keep the empty pending proposal so the owner can retry
-      if (!draftRes.ok) {
-        const draftErr = await draftRes.json().catch(() => ({}));
-        const statusMsg =
-          draftRes.status === 404
-            ? "Proposal not found (404). Please click Regenerate to retry."
-            : draftRes.status === 409
-            ? "Proposal is not pending approval (409)."
-            : draftRes.status === 400
-            ? "Bad Request (400): Missing proposal id."
-            : draftErr.error || `Bot failed to fill in draft text (${draftRes.status})`;
-        setErrorFeedback(statusMsg);
-        // Keep the empty pending proposal in composer so owner can retry via Regenerate
-        return;
-      }
-
-      const draftJson = await draftRes.json().catch(() => ({}));
-      const updatedProposal: OutreachProposal = draftJson.data;
-      const finalText = updatedProposal?.proposed_text || "";
-
-      // 3. Show the returned draft in the composer with Approve, Reject, and Regenerate
-      setProposals((prev) =>
-        prev.map((p) =>
-          p.id === createdProposal!.id
-            ? { ...p, proposed_text: finalText, state: "pending_approval" }
-            : p
-        )
-      );
-      setComposerText(finalText);
-      savedProposalTextRef.current = finalText;
-
-      startTransition(() => {
-        router.refresh();
-      });
+      // Trigger bot drafting and polling
+      await triggerProposalGeneration(createdProposal.id, "");
     } catch (err: any) {
-      console.error("New message bot drafting error:", err);
-      // 4. If the call fails, show the error and keep the empty pending proposal so the owner can retry
+      console.error("[outreach] New message bot drafting error:", err);
       setErrorFeedback(err?.message || "Failed to generate bot draft");
-      // Note: createdProposal remains in `proposals` with state 'pending_approval' and empty text,
-      // so the owner can retry via the Regenerate button or edit text directly!
-    } finally {
       setIsDraftingNewMessage(false);
+      setIsRewriting(false);
     }
   };
 
@@ -735,151 +873,16 @@ export function OutreachInbox({
       !proposal ||
       proposal.state !== "pending_approval" ||
       isRewriting ||
+      isDraftingNewMessage ||
       isResolving
     ) {
       return;
     }
 
     const proposalId = proposal.id;
-    // Rule: Do not call regenerate without a real, existing proposal id
     if (!proposalId) return;
 
-    setIsRewriting(true);
-    setErrorFeedback(null);
-
-    const originalProposedText = proposal.proposed_text || "";
-    const { instruction } = buildRegeneratePayload(proposalId, customizeInstruction);
-
-    try {
-      const supabase = createClient();
-      const { data: sessionData } = await supabase.auth.getSession();
-      const token =
-        sessionData?.session?.access_token ||
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-        "";
-
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-      };
-      if (token) {
-        headers["Authorization"] = `Bearer ${token}`;
-      }
-
-      const res = await fetch(OUTREACH_REGENERATE_URL, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          proposal_id: proposalId,
-          instruction,
-          contact_id: selectedContact?.id,
-          thread: timelineInteractions.map((int: OutreachInteraction) => ({
-            direction: int.direction,
-            event_type: int.event_type,
-            message_summary: int.message_summary,
-            event_at: int.event_at || int.created_at,
-          })),
-        }),
-      });
-
-      if (!res.ok) {
-        const errJson = await res.json().catch(() => null);
-        console.warn("[outreach-regenerate] trigger returned status:", res.status, errJson);
-        const statusMsg =
-          res.status === 404
-            ? "Proposal not found (404). Please retry."
-            : res.status === 409
-            ? "Proposal is not pending approval (409)."
-            : res.status === 400
-            ? "Bad Request (400): Missing proposal id."
-            : errJson?.error || `Regenerate failed (${res.status})`;
-        setErrorFeedback(statusMsg);
-        setIsRewriting(false);
-        return;
-      } else {
-        try {
-          const resJson = await res.json();
-          let immediateText: string | null = null;
-          if (resJson?.bot_body) {
-            try {
-              const parsed = JSON.parse(resJson.bot_body);
-              immediateText = parsed.proposed_text || parsed.text || parsed.message || parsed.draft;
-            } catch {}
-          }
-          if (immediateText && immediateText !== originalProposedText) {
-            setComposerText(immediateText);
-            savedProposalTextRef.current = immediateText;
-            setProposals((prev) =>
-              prev.map((p) => (p.id === proposalId ? applyRegeneratedProposalText(p, immediateText!) : p))
-            );
-            setIsRewriting(false);
-            return;
-          }
-        } catch {}
-      }
-    } catch (err: any) {
-      console.error("[outreach-regenerate] error calling function:", err);
-    }
-
-    // Poll the proposal every 2 seconds until proposed_text changes or 45 seconds pass
-    const startTime = Date.now();
-    const MAX_DURATION_MS = 45000;
-
-    if (pollTimerRef.current) {
-      clearInterval(pollTimerRef.current);
-      pollTimerRef.current = null;
-    }
-
-    const checkProposal = async () => {
-      const elapsed = Date.now() - startTime;
-      if (elapsed >= MAX_DURATION_MS) {
-        if (pollTimerRef.current) {
-          clearInterval(pollTimerRef.current);
-          pollTimerRef.current = null;
-        }
-        setIsRewriting(false);
-        return;
-      }
-
-      try {
-        const pollRes = await fetch(`/api/outreach/proposals?id=${proposalId}`);
-        if (!pollRes.ok) return;
-
-        const pollJson = await pollRes.json();
-        const updated = pollJson.data;
-
-        if (updated && updated.id === proposalId) {
-          if (updated.proposed_text && updated.proposed_text !== originalProposedText) {
-            // Text updated
-            if (pollTimerRef.current) {
-              clearInterval(pollTimerRef.current);
-              pollTimerRef.current = null;
-            }
-
-            // Replace the draft text
-            setComposerText(updated.proposed_text);
-            savedProposalTextRef.current = updated.proposed_text;
-
-            // Update proposals in local state
-            setProposals((prev) =>
-              prev.map((p) =>
-                p.id === proposalId ? applyRegeneratedProposalText(p, updated.proposed_text) : p
-              )
-            );
-
-            // Clear rewriting state
-            setIsRewriting(false);
-
-            startTransition(() => {
-              router.refresh();
-            });
-          }
-        }
-      } catch (pollErr) {
-        console.error("[outreach-regenerate] polling check failed:", pollErr);
-      }
-    };
-
-    pollTimerRef.current = setInterval(checkProposal, 2000);
+    await triggerProposalGeneration(proposalId, proposal.proposed_text || "");
   };
 
   const contactName = selectedContact?.full_name || selectedContact?.name || "";
@@ -1396,15 +1399,15 @@ export function OutreachInbox({
                     className="h-7 px-2 sm:px-2.5 text-[11px] font-medium gap-1.5 border-border bg-background hover:bg-muted text-foreground transition-colors shrink-0 disabled:opacity-50"
                     title="Call bot to draft a fresh message based on conversation history"
                   >
-                    {isDraftingNewMessage ? (
+                    {(isDraftingNewMessage || isRewriting) ? (
                       <RotateCw className="h-3.5 w-3.5 animate-spin text-primary" />
                     ) : (
                       <Sparkles className="h-3.5 w-3.5 text-primary" />
                     )}
-                    <span>{isDraftingNewMessage ? "Drafting…" : "New message"}</span>
+                    <span>{(isDraftingNewMessage || isRewriting) ? "Drafting…" : "New message"}</span>
                   </Button>
                   <span className="text-[9px] text-muted-foreground hidden 2xl:inline max-w-[200px] truncate">
-                    {isDraftingNewMessage ? "Bot drafting message…" : "Bot drafts message from history"}
+                    {(isDraftingNewMessage || isRewriting) ? "Bot drafting message…" : "Bot drafts message from history"}
                   </span>
                 </div>
 
@@ -1675,10 +1678,10 @@ export function OutreachInbox({
                     <span className="font-semibold text-foreground flex items-center gap-1.5">
                       <Bot className="h-3.5 w-3.5 text-primary" />
                       <span>Bot Draft ({activeProposal.channel || "LinkedIn"})</span>
-                      {isRewriting && (
+                      {(isRewriting || isDraftingNewMessage) && (
                         <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30 animate-pulse">
                           <RotateCw className="h-2.5 w-2.5 animate-spin" />
-                          Rewriting...
+                          Drafting…
                         </span>
                       )}
                     </span>
@@ -1690,12 +1693,12 @@ export function OutreachInbox({
                         className="text-[10px] text-primary hover:underline flex items-center gap-1 font-semibold cursor-pointer disabled:opacity-50"
                         title="Call bot to draft a fresh message based on conversation history"
                       >
-                        {isDraftingNewMessage ? (
+                        {(isDraftingNewMessage || isRewriting) ? (
                           <RotateCw className="h-2.5 w-2.5 animate-spin" />
                         ) : (
                           <Sparkles className="h-2.5 w-2.5" />
                         )}
-                        <span>{isDraftingNewMessage ? "Drafting…" : "New message"}</span>
+                        <span>{(isDraftingNewMessage || isRewriting) ? "Drafting…" : "New message"}</span>
                       </button>
                       <span className="font-mono text-[10px]">
                         {composerText.length} characters
@@ -1709,10 +1712,10 @@ export function OutreachInbox({
                     </p>
                   )}
 
-                  {isRewriting && (
+                  {(isRewriting || isDraftingNewMessage) && (
                     <div className="flex items-center gap-2 p-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-700 dark:text-amber-300 text-xs">
                       <RotateCw className="h-3.5 w-3.5 animate-spin shrink-0 text-amber-600 dark:text-amber-400" />
-                      <span>Rewriting... Waiting for updated proposal.</span>
+                      <span>Drafting… Waiting for bot to generate text.</span>
                     </div>
                   )}
 
@@ -1720,8 +1723,8 @@ export function OutreachInbox({
                     value={composerText}
                     onChange={(e) => setComposerText(e.target.value)}
                     rows={3}
-                    disabled={isResolving || isRewriting}
-                    placeholder="Edit message..."
+                    disabled={isResolving || isRewriting || isDraftingNewMessage}
+                    placeholder={(isRewriting || isDraftingNewMessage) ? "Drafting… Waiting for bot to generate text." : "Edit message..."}
                     className="w-full resize-y p-2.5 text-xs rounded-lg border border-input bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring transition-all disabled:opacity-70"
                   />
 
@@ -1780,7 +1783,7 @@ export function OutreachInbox({
                             handleRegenerate();
                           }
                         }}
-                        disabled={isResolving || isRewriting}
+                        disabled={isResolving || isRewriting || isDraftingNewMessage}
                         className="h-7 px-2.5 text-xs bg-background border border-input rounded-md text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring flex-1 max-w-sm transition-colors disabled:opacity-50"
                       />
                     </div>
@@ -1789,7 +1792,7 @@ export function OutreachInbox({
                     <div className="flex items-center gap-2 shrink-0">
                       <Button
                         size="sm"
-                        disabled={isResolving || isRewriting}
+                        disabled={isResolving || isRewriting || isDraftingNewMessage}
                         onClick={handleApproveProposal}
                         className="h-7 text-xs bg-emerald-600 hover:bg-emerald-700 text-white font-medium gap-1 px-3 shadow-xs cursor-pointer disabled:cursor-not-allowed"
                       >
@@ -1804,7 +1807,7 @@ export function OutreachInbox({
                       <Button
                         size="sm"
                         variant="outline"
-                        disabled={isResolving || isRewriting}
+                        disabled={isResolving || isRewriting || isDraftingNewMessage}
                         onClick={handleRejectProposal}
                         className="h-7 text-xs text-rose-600 hover:text-rose-700 hover:bg-rose-50 dark:hover:bg-rose-950/20 font-medium gap-1 px-3 border-border cursor-pointer disabled:cursor-not-allowed"
                       >
@@ -1816,17 +1819,17 @@ export function OutreachInbox({
                         type="button"
                         size="sm"
                         variant="outline"
-                        disabled={isResolving || isRewriting}
+                        disabled={isResolving || isRewriting || isDraftingNewMessage}
                         onClick={() => handleRegenerate()}
                         className="h-7 text-xs font-medium gap-1 px-3 border-border text-foreground hover:bg-muted cursor-pointer disabled:cursor-not-allowed"
                         title="Regenerate proposal draft"
                       >
-                        {isRewriting ? (
+                        {(isRewriting || isDraftingNewMessage) ? (
                           <RotateCw className="h-3 w-3 animate-spin text-amber-500" />
                         ) : (
                           <Sparkles className="h-3 w-3 text-amber-500" />
                         )}
-                        <span>{isRewriting ? "Regenerating..." : "Regenerate"}</span>
+                        <span>{(isRewriting || isDraftingNewMessage) ? "Drafting…" : "Regenerate"}</span>
                       </Button>
                     </div>
                   </div>
@@ -1845,17 +1848,17 @@ export function OutreachInbox({
                       className="h-6 text-[11px] font-medium gap-1 px-2.5 border-border text-foreground hover:bg-muted disabled:opacity-50 cursor-pointer"
                       title="Call bot to draft a fresh message based on conversation history"
                     >
-                      {isDraftingNewMessage ? (
+                      {(isDraftingNewMessage || isRewriting) ? (
                         <RotateCw className="h-3 w-3 animate-spin text-primary" />
                       ) : (
                         <Sparkles className="h-3 w-3 text-primary" />
                       )}
-                      <span>{isDraftingNewMessage ? "Drafting…" : "New message"}</span>
+                      <span>{(isDraftingNewMessage || isRewriting) ? "Drafting…" : "New message"}</span>
                     </Button>
                   </div>
                   <textarea
                     disabled
-                    placeholder="No pending draft. Click 'New message' to have the bot draft a message based on conversation history..."
+                    placeholder={(isDraftingNewMessage || isRewriting) ? "Drafting… Calling bot to generate proposal." : "No pending draft. Click 'New message' to have the bot draft a message based on conversation history..."}
                     rows={2}
                     className="w-full resize-none p-2.5 text-xs bg-muted/40 text-muted-foreground border border-input rounded-lg cursor-not-allowed placeholder:text-muted-foreground/60 focus:outline-none"
                   />

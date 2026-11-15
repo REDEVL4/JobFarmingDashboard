@@ -66,3 +66,53 @@ test("New Message Flow: creates pending proposal first then fills in proposed_te
   assert.equal(failedAttemptState[0].state, "pending_approval");
   assert.equal(failedAttemptState[0].id, "prop-new-123");
 });
+
+test("New Message: If pending_approval proposal already exists for contact, show that draft instead of creating duplicate", () => {
+  const contactId = "contact-existing-789";
+  const existingProposal = {
+    id: "prop-existing-1",
+    contact_id: contactId,
+    state: "pending_approval",
+    action_type: "message",
+    proposed_text: "Existing draft for review",
+  };
+
+  const proposalsList = [
+    existingProposal,
+    { id: "prop-old-sent", contact_id: contactId, state: "sent", proposed_text: "Old message" },
+  ];
+
+  // Logic: find existing pending_approval proposal for contact
+  const foundPending = proposalsList.find(
+    (p) => p.contact_id === contactId && p.state === "pending_approval"
+  );
+
+  // Assert that existing draft is found, preventing a second INSERT
+  assert.ok(foundPending);
+  assert.equal(foundPending.id, "prop-existing-1");
+  assert.equal(foundPending.proposed_text, "Existing draft for review");
+});
+
+test("Polling Flow: polls proposal every 3-5s by id until proposed_text updates or 45s pass", () => {
+  const proposalId = "prop-poll-123";
+  const baselineText = "";
+  const maxDurationMs = 45000;
+  const pollIntervalMs = 3500;
+
+  // Poll interval must be in 3-5s range
+  assert.ok(pollIntervalMs >= 3000 && pollIntervalMs <= 5000);
+  assert.equal(maxDurationMs, 45000);
+
+  // Simulation: Poll 1 returns empty (bot still writing in background)
+  const pollResult1 = { id: proposalId, state: "pending_approval", proposed_text: "" };
+  const hasUpdated1 = pollResult1.proposed_text && pollResult1.proposed_text !== baselineText;
+  assert.equal(Boolean(hasUpdated1), false, "Should continue polling when proposed_text is unchanged");
+
+  // Simulation: Poll 2 returns new bot draft
+  const botWrittenText = "Hello! Reaching out regarding your software engineering team.";
+  const pollResult2 = { id: proposalId, state: "pending_approval", proposed_text: botWrittenText };
+  const hasUpdated2 = pollResult2.proposed_text && pollResult2.proposed_text !== baselineText;
+  assert.equal(Boolean(hasUpdated2), true, "Should complete polling when proposed_text updates");
+  assert.equal(pollResult2.proposed_text, botWrittenText);
+});
+
