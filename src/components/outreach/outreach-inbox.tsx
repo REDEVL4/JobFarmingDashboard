@@ -169,11 +169,6 @@ export function OutreachInbox({
 
   // Requirement 2: Bot-driven New message drafting state
   const [isDraftingNewMessage, setIsDraftingNewMessage] = useState(false);
-  const isDraftingRef = useRef(false);
-  useEffect(() => {
-    isDraftingRef.current = isDraftingNewMessage || isRewriting;
-  }, [isDraftingNewMessage, isRewriting]);
-
   const proposalsRef = useRef<OutreachProposal[]>(proposals);
   useEffect(() => {
     proposalsRef.current = proposals;
@@ -238,18 +233,6 @@ export function OutreachInbox({
           }
         } catch {
           // ignore
-        }
-
-        if (!pendingRow) {
-          const res = await fetch(
-            `/api/outreach/proposals?contact_id=${encodeURIComponent(selectedContactId)}`,
-            { cache: "no-store" }
-          );
-          if (res.ok) {
-            const json = await res.json();
-            const serverProposals: OutreachProposal[] = json.data || [];
-            pendingRow = serverProposals.find((p) => p.state === "pending_approval") || null;
-          }
         }
 
         if (isCurrent && pendingRow) {
@@ -329,66 +312,6 @@ export function OutreachInbox({
       savedProposalTextRef.current = newSavedText;
     }
   }, [selectedContactId, initialProposals, initialInteractions, isDraftingNewMessage, isRewriting]);
-
-  // Periodic background refresh every 5 minutes while tab is visible.
-  // Pauses when document.hidden is true, and refreshes once when tab becomes visible again.
-  useEffect(() => {
-    const FIVE_MINUTES_MS = 5 * 60 * 1000;
-    let timerId: NodeJS.Timeout | null = null;
-    let wasHidden = false;
-
-    const startTimer = () => {
-      if (timerId) clearInterval(timerId);
-      timerId = setInterval(() => {
-        if (typeof document !== "undefined" && !document.hidden && !isDraftingRef.current) {
-          startTransition(() => {
-            router.refresh();
-          });
-        }
-      }, FIVE_MINUTES_MS);
-    };
-
-    const stopTimer = () => {
-      if (timerId) {
-        clearInterval(timerId);
-        timerId = null;
-      }
-    };
-
-    const handleVisibilityChange = () => {
-      if (typeof document === "undefined") return;
-      if (document.hidden) {
-        wasHidden = true;
-        stopTimer();
-      } else {
-        if (wasHidden) {
-          wasHidden = false;
-          if (!isDraftingRef.current) {
-            startTransition(() => {
-              router.refresh();
-            });
-          }
-        }
-        startTimer();
-      }
-    };
-
-    if (typeof document !== "undefined") {
-      if (!document.hidden) {
-        startTimer();
-      } else {
-        wasHidden = true;
-      }
-      document.addEventListener("visibilitychange", handleVisibilityChange);
-    }
-
-    return () => {
-      stopTimer();
-      if (typeof document !== "undefined") {
-        document.removeEventListener("visibilitychange", handleVisibilityChange);
-      }
-    };
-  }, [router]);
 
   // Manual refresh button click handler
   const handleManualRefresh = () => {
@@ -994,22 +917,6 @@ export function OutreachInbox({
           }
         } catch {
           // ignore
-        }
-
-        if (!pendingProposal) {
-          const checkRes = await fetch(
-            `/api/outreach/proposals?contact_id=${encodeURIComponent(selectedContact.id)}`,
-            { cache: "no-store" }
-          );
-          if (checkRes.ok) {
-            const checkJson = await checkRes.json();
-            const serverList: OutreachProposal[] = checkJson.data || [];
-            const serverPending = serverList.find((p) => p.state === "pending_approval");
-            if (serverPending) {
-              pendingProposal = serverPending;
-              setProposals((prev) => [serverPending, ...prev.filter((p) => p.id !== serverPending.id)]);
-            }
-          }
         }
       }
 
