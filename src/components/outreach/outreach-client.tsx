@@ -172,55 +172,12 @@ export function OutreachClient({ initialStats, initialProposals = [], status, er
     setRewritingProposalIds((prev) => ({ ...prev, [proposalId]: true }));
     setProposalFeedback(null);
 
-    const originalProposedText = proposal.proposed_text || "";
+    const currentComposerText = proposalTexts[proposalId] ?? proposal.proposed_text ?? "";
     const instruction =
       (customInstructions[proposalId] || "").trim() ||
       "regenerate, more natural, show curiosity";
 
-    try {
-      const supabase = createClient();
-      const { data: sessionData } = await supabase.auth.getSession();
-      const token =
-        sessionData?.session?.access_token ||
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-        "";
-
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-      };
-      if (token) {
-        headers["Authorization"] = `Bearer ${token}`;
-      }
-
-      const res = await fetch(
-        "https://mldtysploensrrulchdl.supabase.co/functions/v1/outreach-regenerate",
-        {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            proposal_id: proposalId,
-            instruction,
-          }),
-        }
-      );
-
-      if (!res.ok) {
-        const errJson = await res.json().catch(() => null);
-        if (res.status === 401 || res.status === 403 || res.status === 404) {
-          setProposalFeedback({
-            id: proposalId,
-            type: "error",
-            text: errJson?.error || "Failed to trigger rewrite.",
-          });
-          setRewritingProposalIds((prev) => ({ ...prev, [proposalId]: false }));
-          return;
-        }
-      }
-    } catch (err: any) {
-      console.error("[outreach-client] regenerate error:", err);
-    }
-
-    // 2-second polling loop up to 45 seconds
+    // 3-second polling loop up to 45 seconds
     const startTime = Date.now();
     const MAX_DURATION_MS = 45000;
 
@@ -241,14 +198,34 @@ export function OutreachClient({ initialStats, initialProposals = [], status, er
       }
 
       try {
-        const pollRes = await fetch(`/api/outreach/proposals?id=${proposalId}`);
-        if (!pollRes.ok) return;
+        let updated: OutreachProposal | null = null;
+        try {
+          const supabase = createClient();
+          const { data, error } = await supabase
+            .from("jf_outreach_proposals")
+            .select("*")
+            .eq("id", proposalId)
+            .maybeSingle();
+          if (!error && data) {
+            updated = data as OutreachProposal;
+          }
+        } catch {
+          // ignore
+        }
 
-        const pollJson = await pollRes.json();
-        const updated = pollJson.data;
+        if (!updated) {
+          const pollRes = await fetch(`/api/outreach/proposals?id=${encodeURIComponent(proposalId)}&t=${Date.now()}`, {
+            cache: "no-store",
+          });
+          if (pollRes.ok) {
+            const pollJson = await pollRes.json();
+            updated = pollJson.data;
+          }
+        }
 
         if (updated && updated.id === proposalId) {
-          if (updated.proposed_text && updated.proposed_text !== originalProposedText) {
+          const newText = (updated.proposed_text || "").trim();
+          if (newText && newText !== currentComposerText.trim()) {
             if (pollTimersRef.current[proposalId]) {
               clearInterval(pollTimersRef.current[proposalId]);
               delete pollTimersRef.current[proposalId];
@@ -256,12 +233,12 @@ export function OutreachClient({ initialStats, initialProposals = [], status, er
 
             setProposalTexts((prev) => ({
               ...prev,
-              [proposalId]: updated.proposed_text,
+              [proposalId]: updated!.proposed_text,
             }));
 
             setProposals((prev) =>
               prev.map((p) =>
-                p.id === proposalId ? { ...p, proposed_text: updated.proposed_text } : p
+                p.id === proposalId ? { ...p, proposed_text: updated!.proposed_text } : p
               )
             );
 
@@ -273,7 +250,69 @@ export function OutreachClient({ initialStats, initialProposals = [], status, er
       }
     };
 
-    pollTimersRef.current[proposalId] = setInterval(checkProposal, 2000);
+    pollTimersRef.current[proposalId] = setInterval(checkProposal, 3000);
+
+    try {
+      const res = await fetch("/api/outreach/draft", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          proposal_id: proposalId,
+          instruction,
+        }),
+      });
+
+      if (!res.ok) {
+        if (pollTimersRef.current[proposalId]) {
+          clearInterval(pollTimersRef.current[proposalId]);
+          delete pollTimersRef.current[proposalId];
+        }
+        const errJson = await res.json().catch(() => null);
+        setProposalFeedback({
+          id: proposalId,
+          type: "error",
+          text: errJson?.error || "Failed to trigger draft generation.",
+        });
+        setRewritingProposalIds((prev) => ({ ...prev, [proposalId]: false }));
+        return;
+      }
+
+      const draftJson = await res.json().catch(() => null);
+      if (draftJson?.data?.proposed_text) {
+        const syncText = draftJson.data.proposed_text;
+        if (syncText.trim() && syncText.trim() !== currentComposerText.trim()) {
+          if (pollTimersRef.current[proposalId]) {
+            clearInterval(pollTimersRef.current[proposalId]);
+            delete pollTimersRef.current[proposalId];
+          }
+
+          setProposalTexts((prev) => ({
+            ...prev,
+            [proposalId]: syncText,
+          }));
+
+          setProposals((prev) =>
+            prev.map((p) =>
+              p.id === proposalId ? { ...p, proposed_text: syncText } : p
+            )
+          );
+
+          setRewritingProposalIds((prev) => ({ ...prev, [proposalId]: false }));
+        }
+      }
+    } catch (err: any) {
+      console.error("[outreach-client] regenerate error:", err);
+      if (pollTimersRef.current[proposalId]) {
+        clearInterval(pollTimersRef.current[proposalId]);
+        delete pollTimersRef.current[proposalId];
+      }
+      setProposalFeedback({
+        id: proposalId,
+        type: "error",
+        text: err?.message || "Network error occurred.",
+      });
+      setRewritingProposalIds((prev) => ({ ...prev, [proposalId]: false }));
+    }
   };
 
   const handleCopy = async (id: string, text: string) => {
@@ -777,7 +816,7 @@ export function OutreachClient({ initialStats, initialProposals = [], status, er
                             ) : (
                               <Sparkles className="h-3 w-3 text-amber-500" />
                             )}
-                            <span>{rewritingProposalIds[proposal.id] ? "Rewriting..." : "Regenerate"}</span>
+                            <span>{rewritingProposalIds[proposal.id] ? "Drafting…" : "Regenerate"}</span>
                           </Button>
                         </div>
 

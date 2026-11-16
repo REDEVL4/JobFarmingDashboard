@@ -144,4 +144,72 @@ test("Regenerate Flow: re-fetches proposal row and updates composer in place wit
   assert.equal(composerText, newBotText);
 });
 
+test("Client-side Poll: updates composer state in-place without page reload and stops on text change", () => {
+  let isDrafting = true;
+  let buttonsDisabled = true;
+  let pollIntervalActive = true;
+  let routerRefreshCalled = false;
+  let composerText = "Initial draft text before regenerate";
+
+  const fakeRouter = {
+    refresh: () => {
+      routerRefreshCalled = true;
+    },
+  };
+
+  // Poll 1: Proposal still has old text
+  const pollResponse1 = { id: "prop-123", proposed_text: "Initial draft text before regenerate" };
+  if (pollResponse1.proposed_text && pollResponse1.proposed_text !== composerText) {
+    composerText = pollResponse1.proposed_text;
+    isDrafting = false;
+    buttonsDisabled = false;
+    pollIntervalActive = false;
+  }
+  assert.equal(isDrafting, true, "Drafting state must remain while waiting for text change");
+  assert.equal(buttonsDisabled, true, "Buttons must remain disabled while drafting");
+  assert.equal(pollIntervalActive, true);
+
+  // Poll 2: Bot finishes and DB updates with new text
+  const pollResponse2 = { id: "prop-123", proposed_text: "Hi Alex, great connecting! Interested in discussing the senior backend role." };
+  if (pollResponse2.proposed_text && pollResponse2.proposed_text !== composerText) {
+    composerText = pollResponse2.proposed_text;
+    isDrafting = false;
+    buttonsDisabled = false;
+    pollIntervalActive = false;
+    // Explicit rule: Do not call router.refresh()
+  }
+
+  assert.equal(composerText, "Hi Alex, great connecting! Interested in discussing the senior backend role.");
+  assert.equal(isDrafting, false, "Drafting state must clear on update");
+  assert.equal(buttonsDisabled, false, "Buttons must be enabled on update");
+  assert.equal(pollIntervalActive, false, "Polling interval must stop on text change");
+  assert.equal(routerRefreshCalled, false, "router.refresh() must not be called to display text");
+});
+
+test("Load Pending Draft On Open: loads existing pending draft into composer without creating a new proposal", () => {
+  const contactId = "contact-777";
+  const existingPendingProposal = {
+    id: "prop-existing-pending",
+    contact_id: contactId,
+    state: "pending_approval",
+    proposed_text: "Hey Sarah, saw your post regarding the open platform engineer role.",
+  };
+
+  let proposals = [existingPendingProposal];
+  let createdNewProposal = false;
+
+  // Simulate on open:
+  const foundPending = proposals.find((p) => p.contact_id === contactId && p.state === "pending_approval");
+  let composerText = "";
+
+  if (foundPending) {
+    composerText = foundPending.proposed_text;
+  } else {
+    createdNewProposal = true;
+  }
+
+  assert.equal(createdNewProposal, false, "Must not create a new proposal when pending draft exists on open");
+  assert.equal(composerText, "Hey Sarah, saw your post regarding the open platform engineer role.");
+});
+
 

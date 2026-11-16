@@ -114,13 +114,27 @@ export function OutreachInbox({
   const liveFetchTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Active proposal in pending_approval (or approved_for_send)
-  const activeProposal = proposals.find(
-    (p) => p.state === "pending_approval" || p.state === "approved_for_send"
-  );
+  const activeProposal = useMemo(() => {
+    const list = selectedContactId
+      ? proposals.filter((p) => p.contact_id === selectedContactId)
+      : proposals;
+    return (
+      list.find((p) => p.state === "pending_approval") ||
+      list.find((p) => p.state === "approved_for_send") ||
+      null
+    );
+  }, [proposals, selectedContactId]);
 
   const [composerText, setComposerText] = useState(
     activeProposal?.approved_text || activeProposal?.proposed_text || ""
   );
+  const composerTextRef = useRef<string>(
+    activeProposal?.approved_text || activeProposal?.proposed_text || ""
+  );
+  useEffect(() => {
+    composerTextRef.current = composerText;
+  }, [composerText]);
+
   const [isResolving, setIsResolving] = useState(false);
   const [justApproved, setJustApproved] = useState(
     activeProposal?.state === "approved_for_send"
@@ -154,6 +168,10 @@ export function OutreachInbox({
 
   // Requirement 2: Bot-driven New message drafting state
   const [isDraftingNewMessage, setIsDraftingNewMessage] = useState(false);
+  const proposalsRef = useRef<OutreachProposal[]>(proposals);
+  useEffect(() => {
+    proposalsRef.current = proposals;
+  }, [proposals]);
 
   // Cleanup polling interval on unmount
   useEffect(() => {
@@ -168,6 +186,83 @@ export function OutreachInbox({
       }
     };
   }, []);
+
+  // Load existing pending draft into composer on open if not already loaded (no new proposal)
+  useEffect(() => {
+    if (!selectedContactId) return;
+
+    let isCurrent = true;
+
+    // Check if proposals already has a pending_approval proposal for this contact
+    const existingPending = proposalsRef.current.find(
+      (p) => p.contact_id === selectedContactId && p.state === "pending_approval"
+    );
+
+    if (existingPending) {
+      const existingText = existingPending.approved_text || existingPending.proposed_text || "";
+      if (composerTextRef.current !== existingText) {
+        setComposerText(existingText);
+        composerTextRef.current = existingText;
+        savedProposalTextRef.current = existingText;
+      }
+      return;
+    }
+
+    // If not found in local proposals state, query Supabase / API
+    const loadPendingDraft = async () => {
+      try {
+        let pendingRow: OutreachProposal | null = null;
+        try {
+          const supabase = createClient();
+          const { data, error } = await supabase
+            .from("jf_outreach_proposals")
+            .select("*")
+            .eq("contact_id", selectedContactId)
+            .eq("state", "pending_approval")
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+          if (!error && data) {
+            pendingRow = data as OutreachProposal;
+          }
+        } catch {
+          // ignore
+        }
+
+        if (!pendingRow) {
+          const res = await fetch(
+            `/api/outreach/proposals?contact_id=${encodeURIComponent(selectedContactId)}`,
+            { cache: "no-store" }
+          );
+          if (res.ok) {
+            const json = await res.json();
+            const serverProposals: OutreachProposal[] = json.data || [];
+            pendingRow = serverProposals.find((p) => p.state === "pending_approval") || null;
+          }
+        }
+
+        if (isCurrent && pendingRow) {
+          setProposals((prev) => {
+            if (prev.some((p) => p.id === pendingRow!.id)) return prev;
+            return [pendingRow!, ...prev];
+          });
+          const textToLoad = pendingRow.approved_text || pendingRow.proposed_text || "";
+          setComposerText(textToLoad);
+          composerTextRef.current = textToLoad;
+          savedProposalTextRef.current = textToLoad;
+        }
+      } catch (err) {
+        console.warn("[outreach] Error loading pending draft on open:", err);
+      }
+    };
+
+    loadPendingDraft();
+
+    return () => {
+      isCurrent = false;
+    };
+  }, [selectedContactId]);
 
   // Sync state when selected contact or proposals change from server
   useEffect(() => {
@@ -625,14 +720,17 @@ export function OutreachInbox({
   };
 
   /**
-   * Helper to poll a proposal every 3 seconds until proposed_text changes or 45s pass.
-   * Requirement 1: Do not stop at the 200 response. The bot writes the text asynchronously.
-   * Requirement 2: Immediately start polling the proposal by id every 3 seconds.
-   * Requirement 3: On each poll, re-fetch the row and if proposed_text has changed, update composer text in place (no full page reload).
-   * Requirement 4: Show a "Drafting…" state while polling.
-   * Requirement 5: Stop polling when the text changes or after 45 seconds.
+   * Helper to poll a proposal every 3 seconds until proposed_text updates or 45s pass or unmount.
+   * Requirement 1: Immediately set local state to "Drafting…" and disable the buttons.
+   * Requirement 2: Start a client-side poll (setInterval every 3 seconds):
+   *   - Re-fetch the proposal by id from Supabase (or your existing API).
+   *   - If proposed_text is different from the current composer text, update composer state with the new text.
+   *   - Clear the "Drafting…" state.
+   *   - Stop the interval.
+   * Requirement 3: Stop the poll after 45 seconds or on component unmount.
+   * Requirement 4: Do not call router.refresh() or any full-page reload to show the new text.
    */
-  const startProposalPolling = (proposalId: string, baselineText: string) => {
+  const startProposalPolling = (proposalId: string) => {
     const startTime = Date.now();
     const MAX_DURATION_MS = 45000; // Stop polling after 45 seconds
     const POLL_INTERVAL_MS = 3000; // Poll every 3 seconds
@@ -658,41 +756,67 @@ export function OutreachInbox({
       }
 
       try {
-        const pollRes = await fetch(
-          `/api/outreach/proposals?id=${encodeURIComponent(proposalId)}&t=${Date.now()}`,
-          { cache: "no-store" }
-        );
-        if (!pollRes.ok) return;
+        let updated: OutreachProposal | null = null;
 
-        const pollJson = await pollRes.json();
-        const updated = pollJson.data;
+        // 1. Try direct Supabase query first
+        try {
+          const supabase = createClient();
+          const { data, error } = await supabase
+            .from("jf_outreach_proposals")
+            .select("*")
+            .eq("id", proposalId)
+            .maybeSingle();
+
+          if (!error && data) {
+            updated = data as OutreachProposal;
+          }
+        } catch {
+          // Fallback to API if client query fails
+        }
+
+        // 2. Fallback to server API endpoint with cache-control no-store
+        if (!updated) {
+          const pollRes = await fetch(
+            `/api/outreach/proposals?id=${encodeURIComponent(proposalId)}&t=${Date.now()}`,
+            { cache: "no-store" }
+          );
+          if (pollRes.ok) {
+            const pollJson = await pollRes.json();
+            updated = pollJson.data;
+          }
+        }
 
         if (updated && updated.id === proposalId) {
           const newText = (updated.proposed_text || "").trim();
-          // Requirement 3: update the composer text in place (no full page reload)
-          // Requirement 5: Stop polling when the text changes or after 45 seconds
-          if (newText && newText !== baselineText.trim()) {
+          const currentText = (composerTextRef.current || "").trim();
+
+          // Requirement 2: If proposed_text is different from current composer text, update composer state
+          if (newText && newText !== currentText) {
             if (pollTimerRef.current) {
               clearInterval(pollTimerRef.current);
               pollTimerRef.current = null;
             }
 
-            // Update composer text in place
-            setComposerText(updated.proposed_text);
-            savedProposalTextRef.current = updated.proposed_text;
+            // Update composer text in place (no full page reload)
+            const targetText = updated.proposed_text || "";
+            setComposerText(targetText);
+            composerTextRef.current = targetText;
+            savedProposalTextRef.current = targetText;
 
             // Update proposals in local state
             setProposals((prev) =>
               prev.map((p) =>
                 p.id === proposalId
-                  ? { ...p, proposed_text: updated.proposed_text, state: "pending_approval" }
+                  ? { ...p, proposed_text: targetText, state: "pending_approval" }
                   : p
               )
             );
 
-            // Clear loading states
+            // Clear the "Drafting…" state
             setIsDraftingNewMessage(false);
             setIsRewriting(false);
+
+            // Requirement 4: Do not call router.refresh() or any full-page reload
           }
         }
       } catch (pollErr) {
@@ -707,15 +831,14 @@ export function OutreachInbox({
    * Helper to trigger draft generation via /api/outreach/draft then poll for updates.
    * Requirement 1: After calling regenerate (or New message), do not stop at the 200 response.
    * Requirement 2: Immediately start polling the proposal by id every 3 seconds.
-   * Requirement 7: Used for both New message and Regenerate flows.
    */
-  const triggerProposalGeneration = async (proposalId: string, baselineText: string) => {
+  const triggerProposalGeneration = async (proposalId: string) => {
     setIsDraftingNewMessage(true);
     setIsRewriting(true);
     setErrorFeedback(null);
 
     // Requirement 2: Immediately start polling the proposal by id every 3 seconds
-    startProposalPolling(proposalId, baselineText);
+    startProposalPolling(proposalId);
 
     try {
       const draftRes = await fetch("/api/outreach/draft", {
@@ -754,8 +877,29 @@ export function OutreachInbox({
         return;
       }
 
-      // Requirement 1: After calling regenerate (or New message), do not stop at the 200 response.
-      // The bot writes the text asynchronously. The polling loop will update composer in place!
+      // If draft returned text immediately, update composer without waiting for poll
+      const draftJson = await draftRes.json().catch(() => ({}));
+      if (draftJson.data && draftJson.data.proposed_text) {
+        const syncText = draftJson.data.proposed_text;
+        if (syncText.trim() && syncText.trim() !== (composerTextRef.current || "").trim()) {
+          if (pollTimerRef.current) {
+            clearInterval(pollTimerRef.current);
+            pollTimerRef.current = null;
+          }
+          setComposerText(syncText);
+          composerTextRef.current = syncText;
+          savedProposalTextRef.current = syncText;
+          setProposals((prev) =>
+            prev.map((p) =>
+              p.id === proposalId
+                ? { ...p, proposed_text: syncText, state: "pending_approval" }
+                : p
+            )
+          );
+          setIsDraftingNewMessage(false);
+          setIsRewriting(false);
+        }
+      }
     } catch (err: any) {
       console.error("[outreach] Draft generation trigger error:", err);
       if (pollTimerRef.current) {
@@ -771,87 +915,98 @@ export function OutreachInbox({
   const handleNewMessageDraft = async () => {
     if (!selectedContact || isDraftingNewMessage || isRewriting || isResolving) return;
 
-    // Requirement 4: If a pending_approval proposal already exists for the contact,
-    // show that draft instead of creating another one or doing nothing.
-    let pendingProposal = proposals.find(
-      (p) => p.contact_id === selectedContact.id && p.state === "pending_approval"
-    );
-
-    if (!pendingProposal) {
-      // Also check server for contact before inserting to avoid duplicates
-      try {
-        const checkRes = await fetch(`/api/outreach/proposals?contact_id=${encodeURIComponent(selectedContact.id)}`);
-        if (checkRes.ok) {
-          const checkJson = await checkRes.json();
-          const serverList: OutreachProposal[] = checkJson.data || [];
-          const serverPending = serverList.find((p) => p.state === "pending_approval");
-          if (serverPending) {
-            pendingProposal = serverPending;
-            setProposals((prev) => [serverPending, ...prev.filter((p) => p.id !== serverPending.id)]);
-          }
-        }
-      } catch (checkErr) {
-        console.warn("[outreach] Check server proposals error:", checkErr);
-      }
-    }
-
-    if (pendingProposal) {
-      // Show that draft in the composer
-      const existingText = pendingProposal.approved_text || pendingProposal.proposed_text || "";
-      setComposerText(existingText);
-      savedProposalTextRef.current = existingText;
-      setJustApproved(false);
-      setErrorFeedback(null);
-
-      // If it already has proposed_text, display that draft for review
-      if (pendingProposal.proposed_text && pendingProposal.proposed_text.trim()) {
-        return;
-      }
-
-      // If pending proposal exists but proposed_text is empty, trigger bot generation on it
-      await triggerProposalGeneration(pendingProposal.id, pendingProposal.proposed_text || "");
-      return;
-    }
-
-    // If no pending_approval proposal exists, create a new one:
+    // Immediately set local state to "Drafting…" and disable the buttons
     setIsDraftingNewMessage(true);
     setIsRewriting(true);
     setErrorFeedback(null);
 
-    let createdProposal: OutreachProposal | null = null;
-
     try {
-      const createRes = await fetch("/api/outreach/proposals", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "create",
-          contact_id: selectedContact.id,
-          action_type: "message",
-          channel: "linkedin",
-          proposed_text: "",
-        }),
-      });
+      // 1. Create or use the existing pending proposal id
+      let pendingProposal = proposals.find(
+        (p) => p.contact_id === selectedContact.id && p.state === "pending_approval"
+      );
 
-      const createJson = await createRes.json().catch(() => ({}));
-      if (!createRes.ok || !createJson.data) {
-        throw new Error(createJson.error || "Failed to create new outreach proposal");
+      if (!pendingProposal) {
+        // Also check Supabase / API before inserting to avoid duplicates
+        try {
+          const supabase = createClient();
+          const { data } = await supabase
+            .from("jf_outreach_proposals")
+            .select("*")
+            .eq("contact_id", selectedContact.id)
+            .eq("state", "pending_approval")
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+          if (data) {
+            pendingProposal = data as OutreachProposal;
+            setProposals((prev) => [pendingProposal!, ...prev.filter((p) => p.id !== pendingProposal!.id)]);
+          }
+        } catch {
+          // ignore
+        }
+
+        if (!pendingProposal) {
+          const checkRes = await fetch(
+            `/api/outreach/proposals?contact_id=${encodeURIComponent(selectedContact.id)}`,
+            { cache: "no-store" }
+          );
+          if (checkRes.ok) {
+            const checkJson = await checkRes.json();
+            const serverList: OutreachProposal[] = checkJson.data || [];
+            const serverPending = serverList.find((p) => p.state === "pending_approval");
+            if (serverPending) {
+              pendingProposal = serverPending;
+              setProposals((prev) => [serverPending, ...prev.filter((p) => p.id !== serverPending.id)]);
+            }
+          }
+        }
       }
 
-      createdProposal = createJson.data as OutreachProposal;
+      let targetProposalId: string;
 
-      // Keep new pending proposal in state and select it as active draft
-      setProposals((prev) => [createdProposal!, ...prev.filter((p) => p.id !== createdProposal!.id)]);
-      setComposerText(createdProposal.proposed_text || "");
-      savedProposalTextRef.current = createdProposal.proposed_text || "";
-      setJustApproved(false);
+      if (pendingProposal) {
+        targetProposalId = pendingProposal.id;
+        const existingText = pendingProposal.approved_text || pendingProposal.proposed_text || "";
+        setComposerText(existingText);
+        composerTextRef.current = existingText;
+        savedProposalTextRef.current = existingText;
+        setJustApproved(false);
+      } else {
+        // Insert a real outreach_proposal
+        const createRes = await fetch("/api/outreach/proposals", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "create",
+            contact_id: selectedContact.id,
+            action_type: "message",
+            channel: "linkedin",
+            proposed_text: "",
+          }),
+        });
 
-      if (!createdProposal.id) {
-        throw new Error("Cannot call regenerate: missing proposal id");
+        const createJson = await createRes.json().catch(() => ({}));
+        if (!createRes.ok || !createJson.data) {
+          throw new Error(createJson.error || "Failed to create new outreach proposal");
+        }
+
+        const createdProposal = createJson.data as OutreachProposal;
+        targetProposalId = createdProposal.id;
+        setProposals((prev) => [createdProposal, ...prev.filter((p) => p.id !== createdProposal.id)]);
+        setComposerText(createdProposal.proposed_text || "");
+        composerTextRef.current = createdProposal.proposed_text || "";
+        savedProposalTextRef.current = createdProposal.proposed_text || "";
+        setJustApproved(false);
       }
 
-      // Trigger bot drafting and polling
-      await triggerProposalGeneration(createdProposal.id, "");
+      if (!targetProposalId) {
+        throw new Error("Cannot call draft endpoint: missing proposal id");
+      }
+
+      // 2. Call the regenerate/draft endpoint and start polling
+      await triggerProposalGeneration(targetProposalId);
     } catch (err: any) {
       console.error("[outreach] New message bot drafting error:", err);
       setErrorFeedback(err?.message || "Failed to generate bot draft");
@@ -878,7 +1033,12 @@ export function OutreachInbox({
     const proposalId = proposal.id;
     if (!proposalId) return;
 
-    await triggerProposalGeneration(proposalId, proposal.proposed_text || "");
+    // Immediately set local state to "Drafting…" and disable the buttons
+    setIsDraftingNewMessage(true);
+    setIsRewriting(true);
+    setErrorFeedback(null);
+
+    await triggerProposalGeneration(proposalId);
   };
 
   const contactName = selectedContact?.full_name || selectedContact?.name || "";
@@ -1707,7 +1867,10 @@ export function OutreachInbox({
 
                   <textarea
                     value={composerText}
-                    onChange={(e) => setComposerText(e.target.value)}
+                    onChange={(e) => {
+                      setComposerText(e.target.value);
+                      composerTextRef.current = e.target.value;
+                    }}
                     rows={3}
                     disabled={isResolving || isRewriting || isDraftingNewMessage}
                     placeholder={(isRewriting || isDraftingNewMessage) ? "Drafting… Waiting for bot to generate text." : "Edit message..."}
