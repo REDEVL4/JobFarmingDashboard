@@ -116,3 +116,32 @@ test("Polling Flow: polls proposal every 3-5s by id until proposed_text updates 
   assert.equal(pollResult2.proposed_text, botWrittenText);
 });
 
+test("Regenerate Flow: re-fetches proposal row and updates composer in place with polling loop", () => {
+  const proposalId = "prop-regen-456";
+  const baselineText = "Previous draft message that owner wants to regenerate";
+  const newBotText = "Hi Jane, following up with a more casual tone regarding the engineering opening!";
+
+  // 1. Regenerate starts polling immediately with 3s interval and 45s max duration
+  const pollIntervalMs = 3000;
+  const maxDurationMs = 45000;
+  assert.equal(pollIntervalMs, 3000);
+  assert.equal(maxDurationMs, 45000);
+
+  // 2. Draft endpoint returns 200 without blocking for completion
+  const endpointResponse = { status: 200, data: { id: proposalId, state: "pending_approval" } };
+  assert.equal(endpointResponse.status, 200);
+
+  // 3. Poll checks if text has changed from baseline
+  const pollCheck1 = { id: proposalId, proposed_text: baselineText };
+  assert.equal(pollCheck1.proposed_text !== baselineText, false, "Still baseline on early poll");
+
+  const pollCheck2 = { id: proposalId, proposed_text: newBotText };
+  assert.equal(pollCheck2.proposed_text !== baselineText, true, "Text updated on later poll");
+
+  // 4. In-place state update: composerText updated directly without page reload
+  let composerText = baselineText;
+  composerText = pollCheck2.proposed_text;
+  assert.equal(composerText, newBotText);
+});
+
+

@@ -169,7 +169,10 @@ export async function GET(req: NextRequest) {
       if (!result.data && result.error) {
         return NextResponse.json({ error: result.error }, { status: 500 });
       }
-      return NextResponse.json({ success: true, data: result.data });
+      return NextResponse.json(
+        { success: true, data: result.data },
+        { headers: { "Cache-Control": "no-store, no-cache, must-revalidate" } }
+      );
     }
 
     if (contactId) {
@@ -191,7 +194,10 @@ export async function GET(req: NextRequest) {
         return NextResponse.json({ error: proposalsRes.error.message }, { status: 500 });
       }
 
-      return NextResponse.json({ success: true, data: proposalsRes.data || [] });
+      return NextResponse.json(
+        { success: true, data: proposalsRes.data || [] },
+        { headers: { "Cache-Control": "no-store, no-cache, must-revalidate" } }
+      );
     }
   } catch (err: any) {
     console.error("[api/outreach/proposals GET] Error:", err);

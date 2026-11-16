@@ -625,16 +625,17 @@ export function OutreachInbox({
   };
 
   /**
-   * Helper to poll a proposal every 3-5 seconds until proposed_text changes or 45s pass.
-   * Requirement 1: Do not assume text is ready immediately. The call returns 200 before the bot finishes writing.
-   * Requirement 2: Poll proposal every 3-5 seconds (by id) until proposed_text changes or 45 seconds pass.
-   * Requirement 3: When proposed_text updates, refresh the draft in the composer and show the new text.
-   * Requirement 5: Show a loading state ("Drafting…") while polling.
+   * Helper to poll a proposal every 3 seconds until proposed_text changes or 45s pass.
+   * Requirement 1: Do not stop at the 200 response. The bot writes the text asynchronously.
+   * Requirement 2: Immediately start polling the proposal by id every 3 seconds.
+   * Requirement 3: On each poll, re-fetch the row and if proposed_text has changed, update composer text in place (no full page reload).
+   * Requirement 4: Show a "Drafting…" state while polling.
+   * Requirement 5: Stop polling when the text changes or after 45 seconds.
    */
   const startProposalPolling = (proposalId: string, baselineText: string) => {
     const startTime = Date.now();
-    const MAX_DURATION_MS = 45000; // 45 seconds
-    const POLL_INTERVAL_MS = 3500; // 3.5 seconds (within 3–5 seconds requirement)
+    const MAX_DURATION_MS = 45000; // Stop polling after 45 seconds
+    const POLL_INTERVAL_MS = 3000; // Poll every 3 seconds
 
     if (pollTimerRef.current) {
       clearInterval(pollTimerRef.current);
@@ -657,7 +658,10 @@ export function OutreachInbox({
       }
 
       try {
-        const pollRes = await fetch(`/api/outreach/proposals?id=${encodeURIComponent(proposalId)}`);
+        const pollRes = await fetch(
+          `/api/outreach/proposals?id=${encodeURIComponent(proposalId)}&t=${Date.now()}`,
+          { cache: "no-store" }
+        );
         if (!pollRes.ok) return;
 
         const pollJson = await pollRes.json();
@@ -665,16 +669,19 @@ export function OutreachInbox({
 
         if (updated && updated.id === proposalId) {
           const newText = (updated.proposed_text || "").trim();
+          // Requirement 3: update the composer text in place (no full page reload)
+          // Requirement 5: Stop polling when the text changes or after 45 seconds
           if (newText && newText !== baselineText.trim()) {
             if (pollTimerRef.current) {
               clearInterval(pollTimerRef.current);
               pollTimerRef.current = null;
             }
 
-            // Refresh draft in composer and show new text
+            // Update composer text in place
             setComposerText(updated.proposed_text);
             savedProposalTextRef.current = updated.proposed_text;
 
+            // Update proposals in local state
             setProposals((prev) =>
               prev.map((p) =>
                 p.id === proposalId
@@ -683,16 +690,13 @@ export function OutreachInbox({
               )
             );
 
+            // Clear loading states
             setIsDraftingNewMessage(false);
             setIsRewriting(false);
-
-            startTransition(() => {
-              router.refresh();
-            });
           }
         }
       } catch (pollErr) {
-        console.error("[outreach] Polling proposal check failed:", pollErr);
+        console.error("[outreach] Polling check failed:", pollErr);
       }
     };
 
@@ -700,12 +704,18 @@ export function OutreachInbox({
   };
 
   /**
-   * Helper to trigger draft generation via /api/outreach/draft then initiate polling.
+   * Helper to trigger draft generation via /api/outreach/draft then poll for updates.
+   * Requirement 1: After calling regenerate (or New message), do not stop at the 200 response.
+   * Requirement 2: Immediately start polling the proposal by id every 3 seconds.
+   * Requirement 7: Used for both New message and Regenerate flows.
    */
   const triggerProposalGeneration = async (proposalId: string, baselineText: string) => {
     setIsDraftingNewMessage(true);
     setIsRewriting(true);
     setErrorFeedback(null);
+
+    // Requirement 2: Immediately start polling the proposal by id every 3 seconds
+    startProposalPolling(proposalId, baselineText);
 
     try {
       const draftRes = await fetch("/api/outreach/draft", {
@@ -725,6 +735,10 @@ export function OutreachInbox({
       });
 
       if (!draftRes.ok) {
+        if (pollTimerRef.current) {
+          clearInterval(pollTimerRef.current);
+          pollTimerRef.current = null;
+        }
         const draftErr = await draftRes.json().catch(() => ({}));
         const statusMsg =
           draftRes.status === 404
@@ -740,32 +754,14 @@ export function OutreachInbox({
         return;
       }
 
-      // Requirement 1: After calling regenerate (or draft endpoint), do not assume text is ready immediately.
-      // The call returns 200 before the bot finishes writing.
-      const draftJson = await draftRes.json().catch(() => null);
-      const returnedText = draftJson?.data?.proposed_text || draftJson?.proposed_text || null;
-      if (returnedText && returnedText.trim() && returnedText.trim() !== baselineText.trim()) {
-        setComposerText(returnedText);
-        savedProposalTextRef.current = returnedText;
-        setProposals((prev) =>
-          prev.map((p) =>
-            p.id === proposalId
-              ? { ...p, proposed_text: returnedText, state: "pending_approval" }
-              : p
-          )
-        );
-        setIsDraftingNewMessage(false);
-        setIsRewriting(false);
-        startTransition(() => {
-          router.refresh();
-        });
-        return;
-      }
-
-      // Requirement 2: Poll proposal every 3-5 seconds until proposed_text changes or 45 seconds pass
-      startProposalPolling(proposalId, baselineText);
+      // Requirement 1: After calling regenerate (or New message), do not stop at the 200 response.
+      // The bot writes the text asynchronously. The polling loop will update composer in place!
     } catch (err: any) {
       console.error("[outreach] Draft generation trigger error:", err);
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
       setErrorFeedback(err?.message || "Failed to initiate draft generation");
       setIsDraftingNewMessage(false);
       setIsRewriting(false);
@@ -1643,17 +1639,7 @@ export function OutreachInbox({
 
             {/* Bottom Composer */}
             <div className="p-3 sm:p-4 border-t border-border bg-card/80 space-y-2 shrink-0">
-              {isDraftingNewMessage ? (
-                <div className="space-y-2 p-3 rounded-xl border border-primary/40 bg-card/90 shadow-xs">
-                  <div className="flex items-center gap-2 text-xs font-semibold text-primary">
-                    <RotateCw className="h-3.5 w-3.5 animate-spin" />
-                    <span>Bot is drafting a new message based on conversation history...</span>
-                  </div>
-                  <div className="p-3 rounded-lg bg-background/50 border border-input text-xs text-muted-foreground animate-pulse">
-                    Analyzing contact profile, recruiter signals, and prior thread interactions to draft response...
-                  </div>
-                </div>
-              ) : justApproved ? (
+              {justApproved ? (
                 <div className="space-y-2">
                   <div className="flex items-center gap-2 p-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-700 dark:text-emerald-300 font-semibold text-xs">
                     <Check className="h-4 w-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
