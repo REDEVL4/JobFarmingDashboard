@@ -171,8 +171,8 @@ export function OutreachClient({ initialStats, initialProposals = [], status, er
 
     setRewritingProposalIds((prev) => ({ ...prev, [proposalId]: true }));
     setProposalFeedback(null);
+    setProposalTexts((prev) => ({ ...prev, [proposalId]: "" }));
 
-    const currentComposerText = proposalTexts[proposalId] ?? proposal.proposed_text ?? "";
     const instruction =
       (customInstructions[proposalId] || "").trim() ||
       "regenerate, more natural, show curiosity";
@@ -203,7 +203,7 @@ export function OutreachClient({ initialStats, initialProposals = [], status, er
           const supabase = createClient();
           const { data, error } = await supabase
             .from("jf_outreach_proposals")
-            .select("*")
+            .select("id, proposed_text, updated_at")
             .eq("id", proposalId)
             .maybeSingle();
           if (!error && data) {
@@ -225,7 +225,8 @@ export function OutreachClient({ initialStats, initialProposals = [], status, er
 
         if (updated && updated.id === proposalId) {
           const newText = (updated.proposed_text || "").trim();
-          if (newText && newText !== currentComposerText.trim()) {
+          const currentVal = (proposalTexts[proposalId] || "").trim();
+          if (newText && newText !== currentVal) {
             if (pollTimersRef.current[proposalId]) {
               clearInterval(pollTimersRef.current[proposalId]);
               delete pollTimersRef.current[proposalId];
@@ -280,7 +281,7 @@ export function OutreachClient({ initialStats, initialProposals = [], status, er
       const draftJson = await res.json().catch(() => null);
       if (draftJson?.data?.proposed_text) {
         const syncText = draftJson.data.proposed_text;
-        if (syncText.trim() && syncText.trim() !== currentComposerText.trim()) {
+        if (syncText.trim() && syncText.trim() !== (proposalTexts[proposalId] || "").trim()) {
           if (pollTimersRef.current[proposalId]) {
             clearInterval(pollTimersRef.current[proposalId]);
             delete pollTimersRef.current[proposalId];
@@ -707,7 +708,7 @@ export function OutreachClient({ initialStats, initialProposals = [], status, er
                           {rewritingProposalIds[proposal.id] && (
                             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30 animate-pulse">
                               <RotateCw className="h-2.5 w-2.5 animate-spin" />
-                              Rewriting...
+                              Drafting…
                             </span>
                           )}
                         </span>
@@ -726,7 +727,7 @@ export function OutreachClient({ initialStats, initialProposals = [], status, er
                         rows={3}
                         disabled={isResolving || !isPending || rewritingProposalIds[proposal.id]}
                         className="w-full p-2.5 text-xs rounded-lg border border-input bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-y disabled:opacity-75"
-                        placeholder="Proposed outreach text..."
+                        placeholder={rewritingProposalIds[proposal.id] ? "Drafting…" : "Proposed outreach text..."}
                       />
 
                       {proposal.attachment_path && (

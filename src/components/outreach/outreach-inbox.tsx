@@ -131,6 +131,7 @@ export function OutreachInbox({
   const composerTextRef = useRef<string>(
     activeProposal?.approved_text || activeProposal?.proposed_text || ""
   );
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   useEffect(() => {
     composerTextRef.current = composerText;
   }, [composerText]);
@@ -168,6 +169,11 @@ export function OutreachInbox({
 
   // Requirement 2: Bot-driven New message drafting state
   const [isDraftingNewMessage, setIsDraftingNewMessage] = useState(false);
+  const isDraftingRef = useRef(false);
+  useEffect(() => {
+    isDraftingRef.current = isDraftingNewMessage || isRewriting;
+  }, [isDraftingNewMessage, isRewriting]);
+
   const proposalsRef = useRef<OutreachProposal[]>(proposals);
   useEffect(() => {
     proposalsRef.current = proposals;
@@ -204,6 +210,10 @@ export function OutreachInbox({
         setComposerText(existingText);
         composerTextRef.current = existingText;
         savedProposalTextRef.current = existingText;
+        if (textareaRef.current) {
+          textareaRef.current.value = existingText;
+          textareaRef.current.dispatchEvent(new Event("input", { bubbles: true }));
+        }
       }
       return;
     }
@@ -216,7 +226,7 @@ export function OutreachInbox({
           const supabase = createClient();
           const { data, error } = await supabase
             .from("jf_outreach_proposals")
-            .select("*")
+            .select("id, contact_id, proposed_text, approved_text, action_type, channel, state, created_at, updated_at")
             .eq("contact_id", selectedContactId)
             .eq("state", "pending_approval")
             .order("created_at", { ascending: false })
@@ -251,6 +261,10 @@ export function OutreachInbox({
           setComposerText(textToLoad);
           composerTextRef.current = textToLoad;
           savedProposalTextRef.current = textToLoad;
+          if (textareaRef.current) {
+            textareaRef.current.value = textToLoad;
+            textareaRef.current.dispatchEvent(new Event("input", { bubbles: true }));
+          }
         }
       } catch (err) {
         console.warn("[outreach] Error loading pending draft on open:", err);
@@ -266,6 +280,9 @@ export function OutreachInbox({
 
   // Sync state when selected contact or proposals change from server
   useEffect(() => {
+    // If currently drafting or polling, do not let server props clobber the active draft or cancel polling!
+    if (isDraftingNewMessage || isRewriting) return;
+
     setProposals(initialProposals);
     setInteractions(initialInteractions);
 
@@ -290,7 +307,12 @@ export function OutreachInbox({
 
       // Switched contact or proposal: load the new proposal text
       setComposerText(newSavedText);
+      composerTextRef.current = newSavedText;
       savedProposalTextRef.current = newSavedText;
+      if (textareaRef.current) {
+        textareaRef.current.value = newSavedText;
+        textareaRef.current.dispatchEvent(new Event("input", { bubbles: true }));
+      }
       prevContactIdRef.current = selectedContactId;
       prevProposalIdRef.current = curr?.id || null;
     } else {
@@ -306,7 +328,7 @@ export function OutreachInbox({
       });
       savedProposalTextRef.current = newSavedText;
     }
-  }, [selectedContactId, initialProposals, initialInteractions]);
+  }, [selectedContactId, initialProposals, initialInteractions, isDraftingNewMessage, isRewriting]);
 
   // Periodic background refresh every 5 minutes while tab is visible.
   // Pauses when document.hidden is true, and refreshes once when tab becomes visible again.
@@ -318,7 +340,7 @@ export function OutreachInbox({
     const startTimer = () => {
       if (timerId) clearInterval(timerId);
       timerId = setInterval(() => {
-        if (typeof document !== "undefined" && !document.hidden) {
+        if (typeof document !== "undefined" && !document.hidden && !isDraftingRef.current) {
           startTransition(() => {
             router.refresh();
           });
@@ -341,9 +363,11 @@ export function OutreachInbox({
       } else {
         if (wasHidden) {
           wasHidden = false;
-          startTransition(() => {
-            router.refresh();
-          });
+          if (!isDraftingRef.current) {
+            startTransition(() => {
+              router.refresh();
+            });
+          }
         }
         startTimer();
       }
@@ -723,10 +747,12 @@ export function OutreachInbox({
    * Helper to poll a proposal every 3 seconds until proposed_text updates or 45s pass or unmount.
    * Requirement 1: Immediately set local state to "Drafting…" and disable the buttons.
    * Requirement 2: Start a client-side poll (setInterval every 3 seconds):
-   *   - Re-fetch the proposal by id from Supabase (or your existing API).
-   *   - If proposed_text is different from the current composer text, update composer state with the new text.
-   *   - Clear the "Drafting…" state.
-   *   - Stop the interval.
+   *   - Fetch only the proposal row by id (proposed_text, updated_at).
+   *   - When proposed_text differs from the current textarea value:
+   *     - Set the textarea value (or the React state that controls it) to the new proposed_text.
+   *     - Clear the "Drafting…" state.
+   *     - Stop the interval.
+   *   - Do this by updating the controlled component state or by setting the DOM node value + dispatching an input event. Do not remount the page.
    * Requirement 3: Stop the poll after 45 seconds or on component unmount.
    * Requirement 4: Do not call router.refresh() or any full-page reload to show the new text.
    */
@@ -756,58 +782,65 @@ export function OutreachInbox({
       }
 
       try {
-        let updated: OutreachProposal | null = null;
+        let row: { id: string; proposed_text?: string | null; updated_at?: string | null } | null = null;
 
-        // 1. Try direct Supabase query first
+        // 1. Fetch only the proposal row by id (proposed_text, updated_at) from Supabase
         try {
           const supabase = createClient();
           const { data, error } = await supabase
             .from("jf_outreach_proposals")
-            .select("*")
+            .select("id, proposed_text, updated_at")
             .eq("id", proposalId)
             .maybeSingle();
 
           if (!error && data) {
-            updated = data as OutreachProposal;
+            row = data;
           }
         } catch {
           // Fallback to API if client query fails
         }
 
         // 2. Fallback to server API endpoint with cache-control no-store
-        if (!updated) {
+        if (!row) {
           const pollRes = await fetch(
             `/api/outreach/proposals?id=${encodeURIComponent(proposalId)}&t=${Date.now()}`,
             { cache: "no-store" }
           );
           if (pollRes.ok) {
             const pollJson = await pollRes.json();
-            updated = pollJson.data;
+            row = pollJson.data;
           }
         }
 
-        if (updated && updated.id === proposalId) {
-          const newText = (updated.proposed_text || "").trim();
-          const currentText = (composerTextRef.current || "").trim();
+        if (row && typeof row.proposed_text === "string") {
+          const newText = row.proposed_text;
+          const currentTextareaVal = textareaRef.current
+            ? textareaRef.current.value
+            : (composerTextRef.current || "");
 
-          // Requirement 2: If proposed_text is different from current composer text, update composer state
-          if (newText && newText !== currentText) {
+          // When proposed_text differs from the current textarea value:
+          if (newText.trim() && newText !== currentTextareaVal) {
             if (pollTimerRef.current) {
               clearInterval(pollTimerRef.current);
               pollTimerRef.current = null;
             }
 
-            // Update composer text in place (no full page reload)
-            const targetText = updated.proposed_text || "";
-            setComposerText(targetText);
-            composerTextRef.current = targetText;
-            savedProposalTextRef.current = targetText;
+            // Set the controlled component state
+            setComposerText(newText);
+            composerTextRef.current = newText;
+            savedProposalTextRef.current = newText;
 
-            // Update proposals in local state
+            // Set the DOM node value directly + dispatch input event
+            if (textareaRef.current) {
+              textareaRef.current.value = newText;
+              textareaRef.current.dispatchEvent(new Event("input", { bubbles: true }));
+            }
+
+            // Update proposals in local state without remounting the page
             setProposals((prev) =>
               prev.map((p) =>
                 p.id === proposalId
-                  ? { ...p, proposed_text: targetText, state: "pending_approval" }
+                  ? { ...p, proposed_text: newText, state: "pending_approval" }
                   : p
               )
             );
@@ -816,7 +849,7 @@ export function OutreachInbox({
             setIsDraftingNewMessage(false);
             setIsRewriting(false);
 
-            // Requirement 4: Do not call router.refresh() or any full-page reload
+            // Stop the poll (already cleared pollTimerRef.current)
           }
         }
       } catch (pollErr) {
@@ -833,11 +866,17 @@ export function OutreachInbox({
    * Requirement 2: Immediately start polling the proposal by id every 3 seconds.
    */
   const triggerProposalGeneration = async (proposalId: string) => {
+    // 1. Set the textarea placeholder to "Drafting…" and disable the buttons
     setIsDraftingNewMessage(true);
     setIsRewriting(true);
     setErrorFeedback(null);
+    setComposerText("");
+    composerTextRef.current = "";
+    if (textareaRef.current) {
+      textareaRef.current.value = "";
+    }
 
-    // Requirement 2: Immediately start polling the proposal by id every 3 seconds
+    // 2. Immediately start polling the proposal by id every 3 seconds
     startProposalPolling(proposalId);
 
     try {
@@ -881,7 +920,8 @@ export function OutreachInbox({
       const draftJson = await draftRes.json().catch(() => ({}));
       if (draftJson.data && draftJson.data.proposed_text) {
         const syncText = draftJson.data.proposed_text;
-        if (syncText.trim() && syncText.trim() !== (composerTextRef.current || "").trim()) {
+        const currentVal = textareaRef.current ? textareaRef.current.value : (composerTextRef.current || "");
+        if (syncText.trim() && syncText !== currentVal) {
           if (pollTimerRef.current) {
             clearInterval(pollTimerRef.current);
             pollTimerRef.current = null;
@@ -889,6 +929,10 @@ export function OutreachInbox({
           setComposerText(syncText);
           composerTextRef.current = syncText;
           savedProposalTextRef.current = syncText;
+          if (textareaRef.current) {
+            textareaRef.current.value = syncText;
+            textareaRef.current.dispatchEvent(new Event("input", { bubbles: true }));
+          }
           setProposals((prev) =>
             prev.map((p) =>
               p.id === proposalId
@@ -919,10 +963,15 @@ export function OutreachInbox({
     setIsDraftingNewMessage(true);
     setIsRewriting(true);
     setErrorFeedback(null);
+    setComposerText("");
+    composerTextRef.current = "";
+    if (textareaRef.current) {
+      textareaRef.current.value = "";
+    }
 
     try {
       // 1. Create or use the existing pending proposal id
-      let pendingProposal = proposals.find(
+      let pendingProposal = proposalsRef.current.find(
         (p) => p.contact_id === selectedContact.id && p.state === "pending_approval"
       );
 
@@ -932,7 +981,7 @@ export function OutreachInbox({
           const supabase = createClient();
           const { data } = await supabase
             .from("jf_outreach_proposals")
-            .select("*")
+            .select("id, contact_id, proposed_text, approved_text, action_type, channel, state, created_at, updated_at")
             .eq("contact_id", selectedContact.id)
             .eq("state", "pending_approval")
             .order("created_at", { ascending: false })
@@ -968,10 +1017,6 @@ export function OutreachInbox({
 
       if (pendingProposal) {
         targetProposalId = pendingProposal.id;
-        const existingText = pendingProposal.approved_text || pendingProposal.proposed_text || "";
-        setComposerText(existingText);
-        composerTextRef.current = existingText;
-        savedProposalTextRef.current = existingText;
         setJustApproved(false);
       } else {
         // Insert a real outreach_proposal
@@ -995,9 +1040,6 @@ export function OutreachInbox({
         const createdProposal = createJson.data as OutreachProposal;
         targetProposalId = createdProposal.id;
         setProposals((prev) => [createdProposal, ...prev.filter((p) => p.id !== createdProposal.id)]);
-        setComposerText(createdProposal.proposed_text || "");
-        composerTextRef.current = createdProposal.proposed_text || "";
-        savedProposalTextRef.current = createdProposal.proposed_text || "";
         setJustApproved(false);
       }
 
@@ -1037,6 +1079,11 @@ export function OutreachInbox({
     setIsDraftingNewMessage(true);
     setIsRewriting(true);
     setErrorFeedback(null);
+    setComposerText("");
+    composerTextRef.current = "";
+    if (textareaRef.current) {
+      textareaRef.current.value = "";
+    }
 
     await triggerProposalGeneration(proposalId);
   };
@@ -1817,13 +1864,13 @@ export function OutreachInbox({
                       : "Bot will draft the next message. You approve before anything is sent."}
                   </p>
                 </div>
-              ) : activeProposal && activeProposal.state === "pending_approval" ? (
+              ) : (activeProposal && activeProposal.state === "pending_approval") || isDraftingNewMessage ? (
                 /* Editable Composer for Pending Proposal */
                 <div className="space-y-2">
                   <div className="flex items-center justify-between text-[11px] text-muted-foreground">
                     <span className="font-semibold text-foreground flex items-center gap-1.5">
                       <Bot className="h-3.5 w-3.5 text-primary" />
-                      <span>Bot Draft ({activeProposal.channel || "LinkedIn"})</span>
+                      <span>Bot Draft ({activeProposal?.channel || "LinkedIn"})</span>
                       {(isRewriting || isDraftingNewMessage) && (
                         <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30 animate-pulse">
                           <RotateCw className="h-2.5 w-2.5 animate-spin" />
@@ -1852,7 +1899,7 @@ export function OutreachInbox({
                     </div>
                   </div>
 
-                  {activeProposal.signal && (
+                  {activeProposal?.signal && (
                     <p className="text-[10px] text-muted-foreground italic px-0.5">
                       Signal: {activeProposal.signal}
                     </p>
@@ -1866,6 +1913,7 @@ export function OutreachInbox({
                   )}
 
                   <textarea
+                    ref={textareaRef}
                     value={composerText}
                     onChange={(e) => {
                       setComposerText(e.target.value);
@@ -1873,11 +1921,11 @@ export function OutreachInbox({
                     }}
                     rows={3}
                     disabled={isResolving || isRewriting || isDraftingNewMessage}
-                    placeholder={(isRewriting || isDraftingNewMessage) ? "Drafting… Waiting for bot to generate text." : "Edit message..."}
+                    placeholder={(isRewriting || isDraftingNewMessage) ? "Drafting…" : "Edit message..."}
                     className="w-full resize-y p-2.5 text-xs rounded-lg border border-input bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring transition-all disabled:opacity-70"
                   />
 
-                  {activeProposal.attachment_path && (
+                  {activeProposal?.attachment_path && (
                     <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-border/80 bg-muted/40 text-xs text-foreground/90 w-fit max-w-full">
                       <FileText className="h-4 w-4 text-primary shrink-0" />
                       {activeProposal.action_type === "resume_share" && (
@@ -2006,6 +2054,7 @@ export function OutreachInbox({
                     </Button>
                   </div>
                   <textarea
+                    ref={textareaRef}
                     disabled
                     placeholder={(isDraftingNewMessage || isRewriting) ? "Drafting… Calling bot to generate proposal." : "No pending draft. Click 'New message' to have the bot draft a message based on conversation history..."}
                     rows={2}

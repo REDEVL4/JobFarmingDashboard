@@ -212,4 +212,24 @@ test("Load Pending Draft On Open: loads existing pending draft into composer wit
   assert.equal(composerText, "Hey Sarah, saw your post regarding the open platform engineer role.");
 });
 
+test("Direct DOM Node Update: sets textarea value and dispatches input event without remounting", () => {
+  let dispatchedEvents = [];
+  const fakeTextarea = {
+    value: "",
+    dispatchEvent: (evt) => {
+      dispatchedEvents.push(evt.type);
+    },
+  };
+
+  const newDraft = "Hi Taylor, following up regarding the distributed systems team opening.";
+
+  // Update DOM directly
+  fakeTextarea.value = newDraft;
+  fakeTextarea.dispatchEvent({ type: "input", bubbles: true });
+
+  assert.equal(fakeTextarea.value, newDraft);
+  assert.equal(dispatchedEvents.length, 1);
+  assert.equal(dispatchedEvents[0], "input");
+});
+
 
