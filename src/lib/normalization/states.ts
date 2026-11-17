@@ -13,10 +13,17 @@ export const CANONICAL_STATES: StatusDefinition[] = [
     description: "Offer evaluated with report, pending decision",
   },
   {
+    id: "preparing",
+    label: "Preparing",
+    group: "pending",
+    aliases: ["preparing", "prepared", "form completed", "form_completed", "awaiting approval", "awaiting_approval", "submission pending", "submission_pending", "parked_apply_broken"],
+    description: "Resume tailored or form filled, not yet submitted",
+  },
+  {
     id: "applied",
     label: "Applied",
     group: "applied",
-    aliases: ["aplicado", "enviada", "aplicada", "sent", "başvuruldu", "basvuruldu", "application_confirmed", "submitted"],
+    aliases: ["aplicado", "enviada", "aplicada", "sent", "başvuruldu", "basvuruldu", "application_confirmed", "submitted", "applied confirmed", "applied_confirmed", "reported submitted", "reported_submitted"],
     description: "Application submitted",
   },
   {
@@ -75,7 +82,7 @@ export const CANONICAL_STATES: StatusDefinition[] = [
     id: "discarded",
     label: "Discarded",
     group: "withdrawn",
-    aliases: ["descartado", "descartada", "cerrada", "cancelada", "iptal edildi", "withdrawn", "closed"],
+    aliases: ["descartado", "descartada", "cerrada", "cancelada", "iptal edildi", "withdrawn", "closed", "skipped"],
     description: "Discarded by candidate or offer closed",
     isTerminal: true,
   },
